@@ -48,7 +48,7 @@ NUM_LABELS  = 4
 @dataclass
 class PreprocConfig:
     target_fps: int   = 5       # extract every Nth frame to reach this rate
-    crop_size:  int   = 224     # face crop resolution (HxW); 224 fits EfficientNet-B0
+    crop_size:  int   = 112   # face crop resolution (HxW); 224 fits EfficientNet-B0
     margin:     int   = 20      # MTCNN face crop margin in pixels
     min_frames: int   = 5       # discard clips with fewer detected faces than this
     num_workers: int  = 16      # parallel video workers in the Slurm CPU job
@@ -63,7 +63,7 @@ class ModelConfig:
     d_model:    int  = 512              # Transformer hidden dimension
     n_heads:    int  = 8                # attention heads (d_model must be divisible)
     n_layers:   int  = 4                # Transformer encoder depth
-    seq_len:    int  = 20               # frames per sequence (2 s at 5 fps)
+    seq_len:    int  = 10               # frames per sequence (2 s at 5 fps)
     dropout:    float = 0.2
     num_outputs: int = NUM_LABELS
 
