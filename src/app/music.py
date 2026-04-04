@@ -62,6 +62,10 @@ class StudyBuddyController(QObject):
             initial_mood,
             limit=self.config.spotify_recommendation_limit,
         )
+        applied_count = self.spotify.apply_queue_to_spotify(
+            max_tracks=self.config.spotify_recommendation_limit,
+        )
+        logger.info("Applied %d startup mood-queue tracks to Spotify", applied_count)
         self.last_queue_refresh = snapshot.last_refresh
         self.tick()
 
@@ -87,6 +91,14 @@ class StudyBuddyController(QObject):
             spotify_snapshot = self.spotify.refresh_for_mood(
                 sample.prediction.mood,
                 limit=self.config.spotify_recommendation_limit,
+            )
+            applied_count = self.spotify.apply_queue_to_spotify(
+                max_tracks=self.config.spotify_recommendation_limit,
+            )
+            logger.info(
+                "Applied %d refreshed mood-queue tracks to Spotify for mood=%s",
+                applied_count,
+                sample.prediction.mood.value,
             )
             self.last_queue_refresh = spotify_snapshot.last_refresh
             if decision.should_switch_song:
