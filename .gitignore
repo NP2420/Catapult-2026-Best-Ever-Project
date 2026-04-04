@@ -1,7 +1,3 @@
-DAiSEE
-DAiSEE_crops
-expression-models
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -218,3 +214,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# machine-learning data directories
+src/machine-learning/DAiSEE/
+src/machine-learning/DAiSEE_crops/
+src/machine-learning/expression-models/
