@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,7 +9,11 @@ from typing import Any
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
+from .config import AppConfig
 from .models import MoodLabel, TrackSummary
+
+
+logger = logging.getLogger(__name__)
 
 
 SPOTIFY_SCOPES = (
@@ -27,12 +32,19 @@ class SpotifySnapshot:
 
 
 class SpotifyController:
-    def __init__(self) -> None:
+    def __init__(self, recommendation_limit: int = 4) -> None:
+        self.recommendation_limit = recommendation_limit
         self.client = self._build_client()
         self.snapshot = SpotifySnapshot(current_track=None, queue=self._fallback_tracks())
 
+    @classmethod
+    def from_config(cls, config: AppConfig) -> "SpotifyController":
+        return cls(recommendation_limit=config.spotify_recommendation_limit)
+
     def refresh_for_mood(self, mood: MoodLabel, limit: int = 4) -> SpotifySnapshot:
+        limit = limit or self.recommendation_limit
         if self.client is None:
+            logger.info("Spotify client unavailable, using fallback queue for mood=%s", mood.value)
             self.snapshot = SpotifySnapshot(
                 current_track=self.snapshot.current_track,
                 queue=self._fallback_tracks(mood, limit),
@@ -55,8 +67,14 @@ class SpotifyController:
                 queue=queue,
                 last_refresh=datetime.now(),
             )
+            logger.info(
+                "Refreshed Spotify queue for mood=%s with %d tracks",
+                mood.value,
+                len(queue),
+            )
             return self.snapshot
         except Exception:
+            logger.exception("Spotify refresh failed, falling back to local queue for mood=%s", mood.value)
             self.snapshot = SpotifySnapshot(
                 current_track=self.snapshot.current_track,
                 queue=self._fallback_tracks(mood, limit),
@@ -72,9 +90,11 @@ class SpotifyController:
             playback = self.client.current_playback()
             item = (playback or {}).get("item")
             if not item:
+                logger.debug("No active Spotify playback found")
                 return None
             return self._track_from_spotify(item)
         except Exception:
+            logger.exception("Failed to fetch current Spotify playback")
             return None
 
     def queue_top_track(self) -> None:
@@ -84,7 +104,9 @@ class SpotifyController:
         try:
             self.client.add_to_queue(self.snapshot.queue[0].uri)
             self.client.next_track()
+            logger.info("Queued and skipped to recommended track: %s", self.snapshot.queue[0].name)
         except Exception:
+            logger.exception("Failed to queue or skip to the recommended Spotify track")
             return
 
     def _build_client(self) -> spotipy.Spotify | None:
@@ -93,6 +115,7 @@ class SpotifyController:
         redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
         if not client_id or not client_secret:
+            logger.warning("Spotify credentials missing; running in fallback music mode")
             return None
 
         auth_manager = SpotifyOAuth(
@@ -102,6 +125,7 @@ class SpotifyController:
             scope=SPOTIFY_SCOPES,
             cache_path=os.getenv("SPOTIFY_CACHE_PATH", ".spotify-study-buddy-cache"),
         )
+        logger.info("Spotify client configured with OAuth redirect URI %s", redirect_uri)
         return spotipy.Spotify(auth_manager=auth_manager)
 
     def _recent_seed_tracks(self) -> list[str]:

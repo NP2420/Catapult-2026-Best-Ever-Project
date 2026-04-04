@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 from pathlib import Path
 
@@ -15,7 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .config import AppConfig
 from .models import BreakState, MoodLabel, SessionSnapshot
+
+
+logger = logging.getLogger(__name__)
 
 
 class FocusLevel(StrEnum):
@@ -24,7 +29,6 @@ class FocusLevel(StrEnum):
     SLEEPY = "sleepy"
 
 
-FRAME_ROOT = Path(__file__).resolve().parents[1] / "buddy-img"
 FOCUS_LEVEL_BY_MOOD = {
     MoodLabel.FOCUSED: FocusLevel.HAPPY,
     MoodLabel.TIRED: FocusLevel.TIRED,
@@ -36,18 +40,19 @@ FOCUS_LEVEL_BY_MOOD = {
 class PixelBuddyWidget(QLabel):
     clicked = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, frame_root: Path, size_px: int, frame_interval_ms: int) -> None:
         super().__init__()
+        self._frame_root = frame_root
         self._mood = MoodLabel.FOCUSED
         self._focus_level = focus_level_for_mood(self._mood)
         self._frame_index = 0
         self._frames = self._load_frames(self._focus_level)
-        self.setFixedSize(96, 96)
+        self.setFixedSize(size_px, size_px)
         self.setScaledContents(False)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance_frame)
-        self._timer.start(300)
+        self._timer.start(frame_interval_ms)
         self._render()
 
     def set_mood(self, mood: MoodLabel) -> None:
@@ -79,13 +84,15 @@ class PixelBuddyWidget(QLabel):
         )
 
     def _load_frames(self, focus_level: FocusLevel) -> list[QPixmap]:
-        frame_dir = FRAME_ROOT / focus_level.value
+        frame_dir = self._frame_root / focus_level.value
         frame_paths = sorted(path for path in frame_dir.glob("*.png") if path.is_file())
         frames = [QPixmap(str(path)) for path in frame_paths]
         valid_frames = [frame for frame in frames if not frame.isNull()]
         if valid_frames:
+            logger.debug("Loaded %d buddy frames for focus level %s", len(valid_frames), focus_level.value)
             return valid_frames
 
+        logger.warning("No valid buddy frames found in %s", frame_dir)
         placeholder = QPixmap(self.size())
         placeholder.fill(Qt.GlobalColor.transparent)
         return [placeholder]
@@ -98,8 +105,9 @@ def focus_level_for_mood(mood: MoodLabel) -> FocusLevel:
 class BuddyWindow(QWidget):
     resume_requested = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, config: AppConfig) -> None:
         super().__init__()
+        self._config = config
         self._expanded = False
         self._drag_origin: QPoint | None = None
 
@@ -110,7 +118,11 @@ class BuddyWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self._buddy = PixelBuddyWidget()
+        self._buddy = PixelBuddyWidget(
+            frame_root=config.buddy_frame_root,
+            size_px=config.buddy_size_px,
+            frame_interval_ms=config.buddy_frame_interval_ms,
+        )
         self._buddy.clicked.connect(self.toggle_expanded)
 
         self._panel = QFrame()
@@ -186,7 +198,7 @@ class BuddyWindow(QWidget):
         if screen is None:
             return
         geometry = screen.availableGeometry()
-        margin = 24
+        margin = self._config.window_margin_px
         self.move(
             geometry.right() - self.width() - margin,
             geometry.bottom() - self.height() - margin,
