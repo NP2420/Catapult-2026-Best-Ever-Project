@@ -1,0 +1,31 @@
+# requirements.txt
+#
+# Install on the DEMO LAPTOP with:
+#   pip install -r requirements.txt
+#
+# This is the minimal set for real-time inference only.
+# Training dependencies (torch, timm, albumentations) are NOT listed here
+# because the laptop doesn't need them — the model runs via ONNX Runtime.
+#
+# Note: facenet-pytorch pulls in torch as a dependency for MTCNN face detection.
+# If you want a truly torch-free laptop setup, replace MTCNN with
+# opencv-contrib-python's DNN face detector (see realtime_inference.py comments).
+
+# ---- Core inference ----
+onnxruntime==1.17.1          # runs the exported .onnx model on CPU
+facenet-pytorch==2.6.0       # MTCNN face detection
+opencv-python==4.9.0.80      # webcam capture + HUD overlay
+
+# ---- Notifications ----
+plyer==2.1.0                 # cross-platform desktop notifications (Task 4)
+
+# ---- Utilities ----
+numpy==1.26.4
+torch==2.2.2                 # pulled in by facenet-pytorch; CPU-only build is fine
+torchvision==0.17.2          # needed by facenet-pytorch
+
+# ---- Spotify (Task 2/3 — included here for convenience) ----
+spotipy==2.23.0
+pygame==2.5.2                # preview URL audio fallback
+requests==2.31.0
+pandas==2.2.1
