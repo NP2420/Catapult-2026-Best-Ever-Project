@@ -14,7 +14,11 @@ Output is written to CROPS_ROOT as:
         test/
             ...
 
-Labels are rescaled from the DAiSEE 0–3 Likert scale to [0, 1] by dividing by 3.
+Labels are rescaled from the DAiSEE 0-3 Likert scale to [0, 1] by dividing by 3.
+
+
+We're look for faces in videos, and it must meet CFG.preproc.min_frames frames of faces for it to be used.
+This outputs the frames (face focused and cropped)
 """
 
 import argparse
@@ -31,7 +35,7 @@ import torch
 from facenet_pytorch import MTCNN
 from tqdm import tqdm
 
-from config import CFG, CROPS_ROOT, DAISEE_LABELS, DAISEE_VIDEOS, LABEL_COLS
+from config import CFG, CROPS_ROOT, DAISEE_LABELS, DAISEE_VIDEOS, LABEL_COLS, BASE_DIR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,17 +45,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Worker — runs in a subprocess, one per video clip
-# ---------------------------------------------------------------------------
 
 def _init_worker(crop_size: int, margin: int, target_fps: int):
     """Initialise per-process state (MTCNN + config)."""
     global DETECTOR, CROP_SIZE, TARGET_FPS
     CROP_SIZE  = crop_size
     TARGET_FPS = target_fps
-    # CPU-based MTCNN: fast enough for preprocessing, no GPU contention
-    DETECTOR = MTCNN(
+    DETECTOR = MTCNN( #MTCNN is for face retreival
         image_size=crop_size,
         margin=margin,
         keep_all=False,       # only the largest/most confident face
@@ -114,9 +115,7 @@ def _process_clip(args) -> dict:
     return {"path": str(video_path), "status": "ok", "n_frames": len(crops)}
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 
 def preprocess_split(split: str, num_workers: int) -> None:
     label_csv  = DAISEE_LABELS[split]
@@ -134,6 +133,7 @@ def preprocess_split(split: str, num_workers: int) -> None:
         raise FileNotFoundError(f"Video root not found: {video_root}")
 
     df = pd.read_csv(label_csv)
+    df.columns = df.columns.str.strip()
 
     # DAiSEE CSV column is named "ClipID" and looks like "0101010001.avi"
     # Videos live under {video_root}/{student_id}/{ClipID}
@@ -220,6 +220,7 @@ def main():
     parser.add_argument("--workers", type=int, default=CFG.preproc.num_workers,
                         help="Number of parallel worker processes")
     args = parser.parse_args()
+
 
     CROPS_ROOT.mkdir(parents=True, exist_ok=True)
 

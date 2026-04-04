@@ -27,9 +27,7 @@ from torch.utils.data import Dataset, WeightedRandomSampler
 from config import CFG, CROPS_ROOT, LABEL_NAMES
 
 
-# ---------------------------------------------------------------------------
 # Albumentations pipelines
-# ---------------------------------------------------------------------------
 
 def build_train_transform(crop_size: int) -> A.Compose:
     """Augmentation applied independently to each frame in a sequence."""
@@ -54,9 +52,7 @@ def build_val_transform() -> A.Compose:
     ])
 
 
-# ---------------------------------------------------------------------------
 # Dataset
-# ---------------------------------------------------------------------------
 
 class DAiSEEDataset(Dataset):
     """
@@ -111,7 +107,7 @@ class DAiSEEDataset(Dataset):
             np.load(c["labels_path"]) for c in self.clips
         ])  # (N_clips, 4)
 
-    # ------------------------------------------------------------------
+
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -161,7 +157,6 @@ class DAiSEEDataset(Dataset):
 
         return frames, labels
 
-    # ------------------------------------------------------------------
 
     def get_sample_weights(self) -> torch.Tensor:
         """
@@ -181,9 +176,7 @@ class DAiSEEDataset(Dataset):
         return torch.from_numpy(weights)
 
 
-# ---------------------------------------------------------------------------
 # DataLoader factory
-# ---------------------------------------------------------------------------
 
 def build_dataloaders(
     batch_size:  int = CFG.train.batch_size,
@@ -246,9 +239,7 @@ def build_dataloaders(
     return train_loader, val_loader, test_loader
 
 
-# ---------------------------------------------------------------------------
 # Quick sanity check
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     ds = DAiSEEDataset("val", max_samples=10)

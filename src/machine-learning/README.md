@@ -30,9 +30,7 @@ task1/
 
 1. Get DAiSEE access at https://iith.ac.in/~daisee-dataset/ (requires academic email)
 2. Confirm your Gautschi allocation is active: `ssh gautschi.rcac.purdue.edu`
-3. Upload DAiSEE to scratch: `rsync -av DAiSEE/ gautschi:/scratch/$USER/DAiSEE/`
-4. Register a Spotify app at https://developer.spotify.com/dashboard (for Task 2/3)
-
+3. Upload DAiSEE to scratch: `rsync -av DAiSEE/ gautschi:/scratch/$USER/DAiSEE/` / put DAiSEE in proper location
 ---
 
 ### Step 1 — Set up environment on Gautschi
@@ -40,7 +38,7 @@ task1/
 ```bash 
 ssh gautschi.rcac.purdue.edu
 cd /scratch/$USER
-git clone <your_repo> clippy && cd clippy/task1
+git clone <your_repo> clippy && cd clippy/
 
 # Edit config.py: set GAUTSCHI_USER = "your_actual_username"
 nano config.py
@@ -51,6 +49,7 @@ bash setup_env.sh
 ---
 
 ### Step 2 — Preprocess DAiSEE
+In preprocess.slurm fix the email
 
 ```bash
 mkdir -p logs
@@ -75,7 +74,7 @@ Typical durations:
 
 ```bash
 conda activate clippy
-python dataset.py
+uv run dataset.py
 # Expected output:
 # Frames shape : torch.Size([10, 3, 112, 112])
 # Labels shape : torch.Size([4])
@@ -87,30 +86,13 @@ python dataset.py
 
 ### Step 4 — Train
 
+In train.slurm fix the email
 ```bash
 sbatch slurm/train.slurm
 tail -f logs/train_<JOBID>.out
 ```
 
 Expected training time: **~90 minutes on one H100** for 40 epochs.
-
-Watch metrics in TensorBoard (from your laptop):
-```bash
-# In a separate terminal, port-forward from Gautschi
-ssh -L 6006:localhost:6006 gautschi.rcac.purdue.edu \
-    "module load anaconda && conda activate clippy && \
-     tensorboard --logdir /scratch/$USER/clippy_logs --port 6006"
-
-# Then open http://localhost:6006 in your browser
-```
-
-Target metrics after 40 epochs on DAiSEE validation set:
-| Dimension   | Target MAE |
-|-------------|-----------|
-| Engagement  | ≤ 0.08    |
-| Boredom     | ≤ 0.06    |
-| Confusion   | ≤ 0.07    |
-| Frustration | ≤ 0.06    |
 
 If val_loss is not improving after epoch 20, check that preprocessing
 completed without errors and that labels are loaded correctly.
@@ -124,7 +106,7 @@ The `train.slurm` script runs this automatically at the end. To run manually:
 ```bash
 conda activate clippy
 python export_onnx.py \
-    --ckpt /scratch/$USER/clippy_checkpoints/best.pt \
+    --ckpt /scratch/gautschi/$USER/clippy/clippy_checkpoints/best.pt \
     --quantize \
     --benchmark
 ```
@@ -141,12 +123,12 @@ Mean latency : 35.2 ms
 
 ```bash
 # From your laptop terminal:
-scp gautschi.rcac.purdue.edu:/scratch/$USER/clippy_engagement_int8.onnx ~/clippy/
-scp gautschi.rcac.purdue.edu:/scratch/$USER/clippy/task1/config.py ~/clippy/
-scp gautschi.rcac.purdue.edu:/scratch/$USER/clippy/task1/realtime_inference.py ~/clippy/
+scp user@gautschi.rcac.purdue.edu:/scratch/gautschi/$USER/folder/clippy_engagement_int8.onnx ~/clippy/
+scp user@gautschi.rcac.purdue.edu:/scratch/gautschi/$USER/folder/config.py ~/clippy/
+scp user@gautschi.rcac.purdue.edu:/scratch/gautschi/$USER/folder/realtime_inference.py ~/clippy/
 
 # Install inference dependencies on laptop
-pip install -r requirements.txt
+uv sync
 ```
 
 ---

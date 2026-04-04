@@ -36,9 +36,7 @@ class EngagementModel(nn.Module):
         self.cfg    = cfg
         self.labels = LABEL_NAMES
 
-        # -----------------------------------------------------------
         # 1. CNN backbone — spatial feature extractor per frame
-        # -----------------------------------------------------------
         self.backbone = timm.create_model(
             cfg.backbone,
             pretrained=cfg.pretrained,
@@ -47,24 +45,18 @@ class EngagementModel(nn.Module):
         )
         feat_dim = self.backbone.num_features   # 1280 for EfficientNet-B0
 
-        # -----------------------------------------------------------
         # 2. Feature projection into Transformer space
-        # -----------------------------------------------------------
         self.input_proj = nn.Sequential(
             nn.Linear(feat_dim, cfg.d_model),
             nn.LayerNorm(cfg.d_model),
         )
 
-        # -----------------------------------------------------------
         # 3. Learnable positional embeddings
-        # -----------------------------------------------------------
         self.pos_embed = nn.Parameter(
             torch.randn(1, cfg.seq_len, cfg.d_model) * 0.02
         )
 
-        # -----------------------------------------------------------
         # 4. Temporal Transformer encoder
-        # -----------------------------------------------------------
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model,
             nhead=cfg.n_heads,
@@ -79,9 +71,7 @@ class EngagementModel(nn.Module):
             num_layers=cfg.n_layers,
         )
 
-        # -----------------------------------------------------------
         # 5. Independent regression head per output dimension
-        # -----------------------------------------------------------
         self.heads = nn.ModuleList([
             nn.Sequential(
                 nn.LayerNorm(cfg.d_model),
@@ -96,8 +86,6 @@ class EngagementModel(nn.Module):
 
         self._init_weights()
 
-    # ------------------------------------------------------------------
-
     def _init_weights(self):
         """Xavier initialisation for projection and head layers."""
         for module in [self.input_proj, *self.heads]:
@@ -106,8 +94,6 @@ class EngagementModel(nn.Module):
                     nn.init.xavier_uniform_(layer.weight)
                     if layer.bias is not None:
                         nn.init.zeros_(layer.bias)
-
-    # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -142,7 +128,6 @@ class EngagementModel(nn.Module):
 
         return scores
 
-    # ------------------------------------------------------------------
 
     def predict_dict(self, x: torch.Tensor) -> list[dict]:
         """
@@ -158,9 +143,7 @@ class EngagementModel(nn.Module):
         ]
 
 
-# ---------------------------------------------------------------------------
 # Model factory + parameter count helper
-# ---------------------------------------------------------------------------
 
 def build_model(cfg: ModelConfig = CFG.model, device: str = "cuda") -> EngagementModel:
     model = EngagementModel(cfg).to(device)
@@ -170,9 +153,7 @@ def build_model(cfg: ModelConfig = CFG.model, device: str = "cuda") -> Engagemen
     return model
 
 
-# ---------------------------------------------------------------------------
 # Quick sanity check
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
