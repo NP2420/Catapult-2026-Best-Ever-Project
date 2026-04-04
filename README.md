@@ -9,13 +9,28 @@ Desktop study companion MVP with:
 
 ## Run
 
+1. Setup Dependencies
+
+```bash
+uv sync
+source .venv/scripts/activate # bash command, may be different in powershell or other kinds of shells
+```
+
+2. Run Application
+
 ```bash
 python src/app/music.py
 ```
 
 ## Environment
 
-Set Spotify credentials if you want live playback integration:
+Set Spotify credentials if you want live playback integration (requires premium unfortunately):
+
+1. Go to Spotify Developer Dashboard
+2. Create an app
+3. Add http://localhost:8888/callback as redirect URI
+4. Copy your Client ID and Client Secret into .env
+5. Run the app
 
 ```bash
 SPOTIFY_CLIENT_ID=...
