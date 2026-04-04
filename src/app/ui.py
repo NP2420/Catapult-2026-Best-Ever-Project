@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
+from enum import StrEnum
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -15,11 +18,18 @@ from PySide6.QtWidgets import (
 from .models import BreakState, MoodLabel, SessionSnapshot
 
 
-MOOD_COLORS = {
-    MoodLabel.FOCUSED: QColor("#3FB67B"),
-    MoodLabel.TIRED: QColor("#F2C14E"),
-    MoodLabel.BORED: QColor("#5DADE2"),
-    MoodLabel.FRUSTRATED: QColor("#E76F51"),
+class FocusLevel(StrEnum):
+    HAPPY = "happy"
+    TIRED = "tired"
+    SLEEPY = "sleepy"
+
+
+FRAME_ROOT = Path(__file__).resolve().parents[1] / "buddy-img"
+FOCUS_LEVEL_BY_MOOD = {
+    MoodLabel.FOCUSED: FocusLevel.HAPPY,
+    MoodLabel.TIRED: FocusLevel.TIRED,
+    MoodLabel.BORED: FocusLevel.TIRED,
+    MoodLabel.FRUSTRATED: FocusLevel.SLEEPY,
 }
 
 
@@ -29,9 +39,11 @@ class PixelBuddyWidget(QLabel):
     def __init__(self) -> None:
         super().__init__()
         self._mood = MoodLabel.FOCUSED
+        self._focus_level = focus_level_for_mood(self._mood)
         self._frame_index = 0
-        self._frames = self._build_frames(self._mood)
+        self._frames = self._load_frames(self._focus_level)
         self.setFixedSize(96, 96)
+        self.setScaledContents(False)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance_frame)
@@ -39,11 +51,13 @@ class PixelBuddyWidget(QLabel):
         self._render()
 
     def set_mood(self, mood: MoodLabel) -> None:
-        if mood == self._mood:
+        next_focus_level = focus_level_for_mood(mood)
+        if mood == self._mood and next_focus_level == self._focus_level:
             return
         self._mood = mood
+        self._focus_level = next_focus_level
         self._frame_index = 0
-        self._frames = self._build_frames(mood)
+        self._frames = self._load_frames(self._focus_level)
         self._render()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -55,51 +69,30 @@ class PixelBuddyWidget(QLabel):
         self._render()
 
     def _render(self) -> None:
-        self.setPixmap(self._frames[self._frame_index])
+        frame = self._frames[self._frame_index]
+        self.setPixmap(
+            frame.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        )
 
-    def _build_frames(self, mood: MoodLabel) -> list[QPixmap]:
-        offsets = [-1, 1, -2, 0]
-        return [self._draw_buddy(mood, body_offset=value) for value in offsets]
+    def _load_frames(self, focus_level: FocusLevel) -> list[QPixmap]:
+        frame_dir = FRAME_ROOT / focus_level.value
+        frame_paths = sorted(path for path in frame_dir.glob("*.png") if path.is_file())
+        frames = [QPixmap(str(path)) for path in frame_paths]
+        valid_frames = [frame for frame in frames if not frame.isNull()]
+        if valid_frames:
+            return valid_frames
 
-    def _draw_buddy(self, mood: MoodLabel, body_offset: int) -> QPixmap:
-        pixmap = QPixmap(self.size())
-        pixmap.fill(Qt.GlobalColor.transparent)
+        placeholder = QPixmap(self.size())
+        placeholder.fill(Qt.GlobalColor.transparent)
+        return [placeholder]
 
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.fillRect(QRect(12, 10, 72, 72), QColor("#132026"))
 
-        color = MOOD_COLORS[mood]
-        painter.fillRect(QRect(24, 22 + body_offset, 48, 40), color)
-        painter.fillRect(QRect(18, 30 + body_offset, 12, 16), color)
-        painter.fillRect(QRect(66, 30 + body_offset, 12, 16), color)
-        painter.fillRect(QRect(30, 60 + body_offset, 10, 12), color)
-        painter.fillRect(QRect(56, 60 + body_offset, 10, 12), color)
-
-        eye_y = 34 + body_offset
-        painter.fillRect(QRect(34, eye_y, 6, 6), QColor("#F8F9FA"))
-        painter.fillRect(QRect(56, eye_y, 6, 6), QColor("#F8F9FA"))
-
-        pupil_y = eye_y + (2 if mood is MoodLabel.TIRED else 1)
-        painter.fillRect(QRect(36, pupil_y, 2, 2), QColor("#0B090A"))
-        painter.fillRect(QRect(58, pupil_y, 2, 2), QColor("#0B090A"))
-
-        pen = QPen(QColor("#0B090A"))
-        pen.setWidth(2)
-        painter.setPen(pen)
-
-        if mood is MoodLabel.FOCUSED:
-            painter.drawLine(39, 50 + body_offset, 57, 50 + body_offset)
-        elif mood is MoodLabel.TIRED:
-            painter.drawLine(39, 51 + body_offset, 57, 49 + body_offset)
-        elif mood is MoodLabel.BORED:
-            painter.drawLine(39, 52 + body_offset, 57, 52 + body_offset)
-        else:
-            painter.drawLine(39, 52 + body_offset, 48, 48 + body_offset)
-            painter.drawLine(48, 48 + body_offset, 57, 52 + body_offset)
-
-        painter.end()
-        return pixmap
+def focus_level_for_mood(mood: MoodLabel) -> FocusLevel:
+    return FOCUS_LEVEL_BY_MOOD.get(mood, FocusLevel.TIRED)
 
 
 class BuddyWindow(QWidget):
