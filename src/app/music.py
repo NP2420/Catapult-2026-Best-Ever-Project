@@ -1,39 +1,101 @@
-import requests
+from __future__ import annotations
 
-
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
-import os
+from PySide6.QtCore import QObject, QTimer
+from PySide6.QtWidgets import QApplication
 
-load_dotenv()  # loads variables from .env
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.app.behavior import ProductivityEngine
+    from src.app.models import SessionSnapshot
+    from src.app.mood import WebcamMoodMonitor
+    from src.app.spotify_client import SpotifyController
+    from src.app.ui import BuddyWindow
+else:
+    from .behavior import ProductivityEngine
+    from .models import SessionSnapshot
+    from .mood import WebcamMoodMonitor
+    from .spotify_client import SpotifyController
+    from .ui import BuddyWindow
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
-REDIRECT_URI = 'http://127.0.0.1:8888/callback'
+class StudyBuddyController(QObject):
+    def __init__(self, window: BuddyWindow) -> None:
+        super().__init__()
+        self.window = window
+        self.mood_monitor = WebcamMoodMonitor(interval_seconds=1.0)
+        self.spotify = SpotifyController()
+        self.productivity = ProductivityEngine()
+        self.last_tick = datetime.now()
+        self.last_queue_refresh: datetime | None = None
+        self.queue_refresh_interval = timedelta(seconds=45)
 
-# 2. Define Scope (modify-playback allows adding to queue)
-scope = "user-modify-playback-state user-read-private"
+        self.window.resume_requested.connect(self.productivity.resume)
 
-# 3. Authenticate using SpotifyOAuth
-# This will open a browser window the first time you run it
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=CLIENT_ID,
-    client_secret=CLIENT_SECRET,
-    redirect_uri=REDIRECT_URI,
-    scope=scope,
-    cache_path=".cache" # Stores your token so you don't login every time
-))
+        self.tick_timer = QTimer(self)
+        self.tick_timer.timeout.connect(self.tick)
+        self.tick_timer.start(1000)
 
-def add_to_queue(track_id):
-    try:
-        # track_id can be a URI: 'spotify:track:ID'
-        sp.add_to_queue(uri=track_id)
-        print("Successfully queued!")
-    except Exception as e:
-        print(f"Error: {e}")
+    def start(self) -> None:
+        self.mood_monitor.start()
+        snapshot = self.spotify.refresh_for_mood(self.mood_monitor.latest_sample().prediction.mood)
+        self.last_queue_refresh = snapshot.last_refresh
+        self.tick()
 
-# Test it
-add_to_queue('spotify:track:5Qv2Nby1xTr9pQyjkrc94J')
+    def stop(self) -> None:
+        self.mood_monitor.stop()
+
+    def tick(self) -> None:
+        now = datetime.now()
+        elapsed = max(1.0, (now - self.last_tick).total_seconds())
+        self.last_tick = now
+
+        sample = self.mood_monitor.latest_sample()
+        decision = self.productivity.tick(sample.prediction.mood, elapsed)
+
+        needs_refresh = decision.should_refresh_queue or self._queue_refresh_due(now)
+        if needs_refresh and not self.productivity.break_state.active:
+            spotify_snapshot = self.spotify.refresh_for_mood(sample.prediction.mood)
+            self.last_queue_refresh = spotify_snapshot.last_refresh
+            if decision.should_switch_song:
+                self.spotify.queue_top_track()
+
+        current_track = self.spotify.current_playback() or self.spotify.snapshot.current_track
+        snapshot = SessionSnapshot(
+            mood=sample.prediction.mood,
+            confidence=sample.prediction.confidence,
+            fatigue_seconds=self.productivity.fatigue_seconds,
+            break_state=self.productivity.break_state,
+            current_track=current_track,
+            upcoming_tracks=self.spotify.snapshot.queue,
+            last_queue_refresh=self.last_queue_refresh,
+        )
+        self.window.update_snapshot(snapshot, webcam_available=sample.available)
+
+    def _queue_refresh_due(self, now: datetime) -> bool:
+        if self.last_queue_refresh is None:
+            return True
+        return (now - self.last_queue_refresh) >= self.queue_refresh_interval
+
+
+def main() -> int:
+    load_dotenv()
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("AI Study Buddy")
+
+    window = BuddyWindow()
+    controller = StudyBuddyController(window)
+    app.aboutToQuit.connect(controller.stop)
+
+    window.show()
+    controller.start()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
