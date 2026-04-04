@@ -129,9 +129,9 @@ class BuddyWindow(QWidget):
         self._panel.setStyleSheet(
             """
             QFrame {
-                background: rgba(17, 24, 39, 235);
-                border: 2px solid rgba(255, 255, 255, 35);
+                background: rgba(17, 24, 39, 50); /* 0=transparent, 255=opaque */
                 border-radius: 16px;
+                border: none;
             }
             QLabel {
                 color: #F8FAFC;
@@ -155,7 +155,7 @@ class BuddyWindow(QWidget):
         title = QLabel("AI Study Buddy")
         title.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
 
-        self._song_label = QLabel("Current song: Waiting for playback")
+        self._song_label = QLabel("Playing: Waiting for playback")
         self._queue_label = QLabel("Up next: building queue...")
         self._mood_label = QLabel("Mood: focused")
         self._status_label = QLabel("Camera: connecting")
@@ -213,14 +213,14 @@ class BuddyWindow(QWidget):
             f"Camera: {'live' if webcam_available else 'offline, using fallback'} | Fatigue: {snapshot.fatigue_seconds:.0f}s"
         )
         self._song_label.setText(
-            "Current song: "
+            "Playing: "
             + (
                 f"{snapshot.current_track.name} - {snapshot.current_track.artist}"
                 if snapshot.current_track
                 else "No active Spotify playback"
             )
         )
-        queue_text = ", ".join(f"{track.name} - {track.artist}" for track in snapshot.upcoming_tracks[:4])
+        queue_text = ", ".join(f"{track.name} - {track.artist}" for track in snapshot.upcoming_tracks[:1])
         self._queue_label.setText(f"Up next: {queue_text or 'No queued recommendations'}")
         self._update_break(snapshot.break_state)
         self._last_update_label.setText(

@@ -126,6 +126,9 @@ def main() -> int:
 
     window.show()
     controller.start()
+    import signal
+
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     return app.exec()
 
 

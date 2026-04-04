@@ -27,7 +27,7 @@ SPOTIFY_SCOPES = (
 @dataclass(slots=True)
 class SpotifySnapshot:
     current_track: TrackSummary | None
-    queue: list[TrackSummary]
+    queue: list[str]
     last_refresh: datetime | None = None
 
 
@@ -53,24 +53,20 @@ class SpotifyController:
             return self.snapshot
 
         try:
-            seeds = self._recent_seed_tracks()
-            recommendations = self.client.recommendations(
-                seed_tracks=seeds[:5],
-                limit=limit,
-                **self._target_audio_profile(mood),
-            )
-            queue = [self._track_from_spotify(item) for item in recommendations.get("tracks", [])]
-            if not queue:
-                queue = self._fallback_tracks(mood, limit)
-            self.snapshot = SpotifySnapshot(
-                current_track=self.current_playback(),
-                queue=queue,
-                last_refresh=datetime.now(),
-            )
+            # seeds = self._recent_seed_tracks()
+            # recommendations = self.client.recommendations(
+            #     seed_tracks=seeds[:5],
+            #     limit=limit,
+            #     **self._target_audio_profile(mood),
+            # )
+            # queue = [self._track_from_spotify(item) for item in recommendations.get("tracks", [])]
+            self.snapshot.queue = self.get_queue_tracks()
+            if not self.snapshot.queue:
+                self.snapshot.queue = self._fallback_tracks(mood, limit)
             logger.info(
                 "Refreshed Spotify queue for mood=%s with %d tracks",
                 mood.value,
-                len(queue),
+                len(self.snapshot.queue),
             )
             return self.snapshot
         except Exception:
@@ -96,7 +92,12 @@ class SpotifyController:
         except Exception:
             logger.exception("Failed to fetch current Spotify playback")
             return None
-
+        
+    def get_queue_tracks(self) -> list[TrackSummary]:
+        resp = self.client.queue()
+        tracks = resp.get("queue", [])
+        return [self._track_from_spotify(track) for track in tracks]
+    
     def queue_top_track(self) -> None:
         if self.client is None or not self.snapshot.queue:
             return
