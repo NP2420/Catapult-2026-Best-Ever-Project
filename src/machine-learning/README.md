@@ -57,8 +57,7 @@ mkdir -p logs
 sbatch slurm/preprocess.slurm
 
 # Monitor progress
-squeue -u $USER
-tail -f logs/preprocess_<JOBID>.out
+tail -f logs/preprocess_$(squeue -u $USER -h -o %i).out
 ```
 
 Expected output in `CROPS_ROOT/{train,val,test}/`:

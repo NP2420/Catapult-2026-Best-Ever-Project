@@ -19,8 +19,8 @@ DAISEE_ROOT   = Path(f"/scratch/{GAUTSCHI_USER}/DAiSEE")
 CROPS_ROOT    = Path(f"/scratch/{GAUTSCHI_USER}/DAiSEE_crops")
 CKPT_DIR      = Path(f"/scratch/{GAUTSCHI_USER}/clippy_checkpoints")
 LOGS_DIR      = Path(f"/scratch/{GAUTSCHI_USER}/clippy_logs")
-ONNX_PATH     = Path(f"/scratch/{GAUTSCHI_USER}/clippy_engagement.onnx")
-ONNX_INT8     = Path(f"/scratch/{GAUTSCHI_USER}/clippy_engagement_int8.onnx")
+ONNX_PATH     = Path(f".\onxx\clippy_engagement.onnx")
+ONNX_INT8     = Path(f".\onxx\clippy_engagement_int8.onnx")
 
 # DAiSEE internal structure (do not change unless your copy differs)
 DAISEE_LABELS = {
