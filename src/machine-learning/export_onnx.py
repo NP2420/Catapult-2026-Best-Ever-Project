@@ -31,10 +31,7 @@ from config import CFG, CKPT_DIR, ONNX_INT8, ONNX_PATH
 from model import EngagementModel
 
 
-# ---------------------------------------------------------------------------
 # Export
-# ---------------------------------------------------------------------------
-
 def export_to_onnx(model: EngagementModel, output_path: Path) -> None:
     model.eval()
 
@@ -77,9 +74,7 @@ def export_to_onnx(model: EngagementModel, output_path: Path) -> None:
         print("  Numerical validation: PASS")
 
 
-# ---------------------------------------------------------------------------
 # INT8 Quantisation
-# ---------------------------------------------------------------------------
 
 def quantize_model(input_path: Path, output_path: Path) -> None:
     """
@@ -113,9 +108,7 @@ def quantize_model(input_path: Path, output_path: Path) -> None:
     print("  Quantisation: PASS")
 
 
-# ---------------------------------------------------------------------------
 # Benchmark
-# ---------------------------------------------------------------------------
 
 def benchmark(onnx_path: Path, n_warmup: int = 10, n_runs: int = 100) -> float:
     """
@@ -160,9 +153,7 @@ def benchmark(onnx_path: Path, n_warmup: int = 10, n_runs: int = 100) -> float:
     return mean_ms
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()

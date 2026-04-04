@@ -36,9 +36,7 @@ from facenet_pytorch import MTCNN
 from config import CFG, LABEL_NAMES
 
 
-# ---------------------------------------------------------------------------
 # EngagementState dataclass — the unit of output from this module
-# ---------------------------------------------------------------------------
 
 @dataclass
 class EngagementState:
@@ -72,9 +70,7 @@ class EngagementState:
         return max(scores, key=scores.get)
 
 
-# ---------------------------------------------------------------------------
 # Image preprocessing helpers
-# ---------------------------------------------------------------------------
 
 _MEAN = np.array(CFG.inference.mean, dtype=np.float32).reshape(3, 1, 1)
 _STD  = np.array(CFG.inference.std,  dtype=np.float32).reshape(3, 1, 1)
@@ -88,9 +84,7 @@ def _normalise(crop_hwc_uint8: np.ndarray) -> np.ndarray:
     return (chw - _MEAN) / _STD
 
 
-# ---------------------------------------------------------------------------
 # HUD drawing
-# ---------------------------------------------------------------------------
 
 _HUD_COLORS = {
     "boredom":    (200, 200,  50),   # BGR
@@ -147,9 +141,7 @@ def draw_hud(frame: np.ndarray, state: EngagementState) -> np.ndarray:
     return frame
 
 
-# ---------------------------------------------------------------------------
 # Core inference engine
-# ---------------------------------------------------------------------------
 
 class InferenceEngine:
     """
@@ -210,7 +202,6 @@ class InferenceEngine:
         # Track face detection confidence for emitted state
         self._last_confidence = 0.0
 
-    # ------------------------------------------------------------------
 
     def start(self):
         """Start capture and inference threads. Non-blocking."""
@@ -230,7 +221,6 @@ class InferenceEngine:
         self._inference_thread.join(timeout=3)
         cv2.destroyAllWindows()
 
-    # ------------------------------------------------------------------
 
     def _capture_loop(self):
         """
@@ -276,7 +266,6 @@ class InferenceEngine:
 
         cap.release()
 
-    # ------------------------------------------------------------------
 
     def _inference_loop(self):
         """
@@ -349,9 +338,7 @@ class InferenceEngine:
             self.output_queue.put(state)
 
 
-# ---------------------------------------------------------------------------
 # Standalone test — run this file directly to verify everything works
-# ---------------------------------------------------------------------------
 
 def inference_loop(output_queue: queue.Queue):
     """Entry point for main.py to call in a thread."""
