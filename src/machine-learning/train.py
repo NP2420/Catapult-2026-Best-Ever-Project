@@ -1,12 +1,6 @@
 """
 train.py — Train the EngagementModel on DAiSEE.
 
-Changes from v1:
-  - WeightedDimLoss: upweights confusion/frustration to fix boredom/engagement bias
-  - Backbone freeze for first UNFREEZE_EPOCH epochs, then differential LR unfreeze
-  - Stronger dropout (set in config.py: dropout=0.3)
-  - All other features retained: AMP, warmup, checkpointing, TensorBoard, resume
-
 Usage (local test):
     python train.py --epochs 2 --batch_size 8 --max_samples 50
 
@@ -69,7 +63,7 @@ class WeightedDimLoss(nn.Module):
         smooth_target = target * (1 - self.smoothing) + 0.5 * self.smoothing
         # per_dim_mse shape: (4,)  — mean over batch for each dimension
         per_dim_mse = ((pred - smooth_target) ** 2).mean(dim=0)
-        return (per_dim_mse * self.dim_weights).mean()
+        return (per_dim_mse * self.dim_weights.to(per_dim_mse.device)).mean()
 
 
 # LR schedule: linear warmup → cosine decay
@@ -139,39 +133,63 @@ def unfreeze_backbone(model, optimizer: AdamW, lr: float, weight_decay: float) -
 
 
 # One training epoch
+# grad_accum_steps > 1 accumulates gradients over N micro-batches before
+# stepping, giving an effective batch size of batch_size × grad_accum_steps
+# without increasing the per-forward-pass tensor size (which caused the
+# 32-bit index overflow at batch_size=128).
 
-def train_epoch(model, loader, optimizer, criterion, scaler, device, writer, global_step):
+def train_epoch(
+    model, loader, optimizer, criterion, scaler, device, writer,
+    global_step, grad_accum_steps: int = 1,
+):
     model.train()
     total_loss = 0.0
     dim_mae    = np.zeros(len(LABEL_NAMES))
     n_batches  = 0
 
-    for frames, labels in loader:
+    optimizer.zero_grad()
+
+    for step, (frames, labels) in enumerate(loader):
         frames = frames.to(device, non_blocking=True)   # (B, T, C, H, W)
         labels = labels.to(device, non_blocking=True)   # (B, 4)
 
-        optimizer.zero_grad()
-
         with torch.cuda.amp.autocast(enabled=CFG.train.mixed_precision):
             preds = model(frames)
-            loss  = criterion(preds, labels)
+            # Divide loss by accum steps so gradients are averaged correctly
+            # across the effective batch before the optimizer step.
+            loss  = criterion(preds, labels) / grad_accum_steps
 
         scaler.scale(loss).backward()
+
+        if (step + 1) % grad_accum_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CFG.train.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+
+            # Un-scale for logging so reported loss matches the original scale
+            loss_for_log = loss.item() * grad_accum_steps
+            total_loss  += loss_for_log
+            dim_mae     += (preds.detach().cpu() - labels.cpu()).abs().mean(dim=0).numpy()
+            n_batches   += 1
+
+            if global_step % 50 == 0:
+                writer.add_scalar("train/batch_loss", loss_for_log, global_step)
+
+            global_step += 1
+
+    # Flush any leftover accumulated gradients at the end of the epoch
+    # (happens when len(loader) is not divisible by grad_accum_steps)
+    remainder = len(loader) % grad_accum_steps
+    if remainder != 0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), CFG.train.grad_clip)
         scaler.step(optimizer)
         scaler.update()
+        optimizer.zero_grad()
 
-        total_loss += loss.item()
-        dim_mae    += (preds.detach().cpu() - labels.cpu()).abs().mean(dim=0).numpy()
-        n_batches  += 1
-
-        if global_step % 50 == 0:
-            writer.add_scalar("train/batch_loss", loss.item(), global_step)
-
-        global_step += 1
-
-    return total_loss / n_batches, dim_mae / n_batches, global_step
+    return total_loss / max(n_batches, 1), dim_mae / max(n_batches, 1), global_step
 
 
 # Validation pass
@@ -221,24 +239,36 @@ def load_checkpoint(path: Path, model, optimizer=None, scheduler=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs",         type=int,   default=60)
-    parser.add_argument("--batch_size",     type=int,   default=CFG.train.batch_size)
-    parser.add_argument("--lr",             type=float, default=CFG.train.lr)
-    parser.add_argument("--num_workers",    type=int,   default=CFG.train.num_workers)
-    parser.add_argument("--unfreeze_epoch", type=int,   default=UNFREEZE_EPOCH,
+    parser.add_argument("--epochs",           type=int,   default=60)
+    # FIX: default lowered from 128 → 32 to avoid 32-bit index overflow in
+    # EfficientNet-B4 when the batch is flattened to (B×T, C, H, W).
+    # Use --grad_accum_steps 4 (the new default) for an effective batch of 128.
+    parser.add_argument("--batch_size",       type=int,   default=32)
+    parser.add_argument("--grad_accum_steps", type=int,   default=4,
+                        help="Accumulate gradients over N steps; "
+                             "effective_bs = batch_size × grad_accum_steps "
+                             "(default 4 → effective 128). Set to 1 to disable.")
+    parser.add_argument("--lr",               type=float, default=CFG.train.lr)
+    parser.add_argument("--num_workers",      type=int,   default=CFG.train.num_workers)
+    parser.add_argument("--unfreeze_epoch",   type=int,   default=UNFREEZE_EPOCH,
                         help="Epoch at which to unfreeze the CNN backbone")
-    parser.add_argument("--max_samples",    type=int,   default=None,
+    parser.add_argument("--max_samples",      type=int,   default=None,
                         help="Cap training set size (debug mode)")
-    parser.add_argument("--resume",         type=str,   default=None,
+    parser.add_argument("--resume",           type=str,   default=None,
                         help="Path to checkpoint to resume from")
-    parser.add_argument("--run_name",       type=str,   default="run_02_weighted")
+    parser.add_argument("--run_name",         type=str,   default="run_02_weighted")
     args = parser.parse_args()
+
+    effective_bs = args.batch_size * args.grad_accum_steps
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"GPU   : {torch.cuda.get_device_name(0)}")
         print(f"VRAM  : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(f"Batch size    : {args.batch_size}  (per step)")
+    print(f"Accum steps   : {args.grad_accum_steps}")
+    print(f"Effective BS  : {effective_bs}")
 
     # Data
     print("\nBuilding dataloaders...")
@@ -260,7 +290,7 @@ def main():
     # Optimizer — initially excludes frozen backbone
     optimizer = build_optimizer_frozen(model, args.lr, CFG.train.weight_decay)
     scheduler = build_scheduler(optimizer, CFG.train.warmup_epochs, args.epochs)
-    criterion = WeightedDimLoss(smoothing=CFG.train.label_smooth)
+    criterion = WeightedDimLoss(smoothing=CFG.train.label_smooth).to(device)
     scaler    = torch.cuda.amp.GradScaler(enabled=CFG.train.mixed_precision)
 
     print(f"\nLoss: WeightedDimLoss  weights={criterion.dim_weights.tolist()}")
@@ -314,7 +344,8 @@ def main():
 
         train_loss, train_mae, global_step = train_epoch(
             model, train_loader, optimizer, criterion,
-            scaler, device, writer, global_step
+            scaler, device, writer, global_step,
+            grad_accum_steps=args.grad_accum_steps,
         )
         val_loss, val_mae = validate(model, val_loader, criterion, device)
         scheduler.step()

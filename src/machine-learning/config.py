@@ -48,23 +48,23 @@ NUM_LABELS  = 4
 @dataclass
 class PreprocConfig:
     target_fps: int   = 5       # extract every Nth frame to reach this rate
-    crop_size:  int   = 112     # face crop resolution (HxW); 112 fits EfficientNet-B0
+    crop_size:  int   = 224     # face crop resolution (HxW); 224 fits EfficientNet-B0
     margin:     int   = 20      # MTCNN face crop margin in pixels
     min_frames: int   = 5       # discard clips with fewer detected faces than this
-    num_workers: int  = 14      # parallel video workers in the Slurm CPU job
+    num_workers: int  = 16      # parallel video workers in the Slurm CPU job
 
 
 # MODEL
 
 @dataclass
 class ModelConfig:
-    backbone:   str = "efficientnet_b0"  # timm model name; swap to b2 for +~1% acc
+    backbone:   str = "efficientnet_b4"  # timm model name; swap to b2 for +~1% acc
     pretrained: bool = True              # use ImageNet weights as starting point
-    d_model:    int  = 256              # Transformer hidden dimension
-    n_heads:    int  = 4                # attention heads (d_model must be divisible)
-    n_layers:   int  = 2                # Transformer encoder depth
-    seq_len:    int  = 10               # frames per sequence (2 s at 5 fps)
-    dropout:    float = 0.1
+    d_model:    int  = 512              # Transformer hidden dimension
+    n_heads:    int  = 8                # attention heads (d_model must be divisible)
+    n_layers:   int  = 4                # Transformer encoder depth
+    seq_len:    int  = 20               # frames per sequence (2 s at 5 fps)
+    dropout:    float = 0.2
     num_outputs: int = NUM_LABELS
 
 
@@ -72,11 +72,11 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    epochs:        int   = 40
-    batch_size:    int   = 256    # fits one H100-80GB easily; raise to 512 if memory allows
-    lr:            float = 3e-4
+    epochs:        int   = 80
+    batch_size:    int   = 32    # fits one H100-80GB easily; raise to 512 if memory allows
+    lr:            float = 1e-3
     weight_decay:  float = 1e-4
-    warmup_epochs: int   = 3      # linear LR warmup before cosine decay
+    warmup_epochs: int   = 5      # linear LR warmup before cosine decay
     grad_clip:     float = 1.0    # gradient clipping max norm
     label_smooth:  float = 0.05   # soft targets to reduce overconfidence
     num_workers:   int   = 14

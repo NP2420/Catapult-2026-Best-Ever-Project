@@ -16,7 +16,6 @@ task1/
 ├── export_onnx.py          Export checkpoint → ONNX → INT8 quantised + benchmark
 ├── realtime_inference.py   Webcam loop using ONNX Runtime (runs on demo laptop)
 ├── requirements.txt        Demo laptop dependencies (inference only)
-├── setup_env.sh            Gautschi conda environment setup
 └── slurm/
     ├── preprocess.slurm    Slurm job: extract face crops (CPU, ~90 min)
     └── train.slurm         Slurm job: train model on H100 (~90 min for 40 epochs)
