@@ -226,3 +226,6 @@ src/machine-learning/expression-models/
 src/ml-focus/tired-data/
 src/ml-focus/tired-yolo/
 src/ml-focus-alt/
+
+src/ml-emotions/runs/
+src/ml-emotions/best.pt
