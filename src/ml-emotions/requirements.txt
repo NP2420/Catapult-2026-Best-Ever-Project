@@ -1,0 +1,18 @@
+# ── Cluster (Gautschi) ──────────────────────────────────────
+# Install inside your conda env:
+#   conda activate clippy
+#   pip install -r requirements.txt
+
+ultralytics>=8.2.0       # YOLOv8 — includes PyTorch dependency resolution
+torch>=2.2.0             # Should already be installed via conda module
+torchvision>=0.17.0
+scikit-learn>=1.4.0      # Metrics, confusion matrix
+matplotlib>=3.8.0        # Plots
+numpy>=1.26.0
+Pillow>=10.0.0
+tqdm>=4.66.0
+
+# ── Local only (webcam_test.py) ──────────────────────────────
+# pip install opencv-python
+# (opencv-python-headless on the cluster if needed for validate.py)
+opencv-python>=4.9.0     # Comment out on cluster if GUI not available
