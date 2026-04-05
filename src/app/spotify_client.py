@@ -6,6 +6,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 
 import requests
@@ -42,6 +43,9 @@ RECENT_RECOMMENDATION_HISTORY = 80
 RECENT_ARTIST_HISTORY = 80
 TASTE_PROFILE_TTL_SECONDS = 600
 CANDIDATE_CACHE_TTL_SECONDS = 600
+DEFAULT_SPOTIFY_RATE_LIMIT_SECONDS = 30
+DEFAULT_RECCOBEATS_RATE_LIMIT_SECONDS = 30
+MAX_RATE_LIMIT_SECONDS = 300
 
 AWAKE_GENRES = ["study", "ambient", "chill", "classical"]
 DROWSY_GENRES = ["lofi", "indie", "electropop", "alt-rock"]
@@ -89,6 +93,8 @@ class SpotifyController:
         self._candidate_cache: dict[str, tuple[list[TrackSummary], datetime]] = {}
         self._spotipy_call_count = 0
         self._reccobeats_call_count = 0
+        self._spotify_rate_limited_until: datetime | None = None
+        self._reccobeats_rate_limited_until: datetime | None = None
 
     @classmethod
     def from_config(cls, config: AppConfig, spotify_enabled: bool = True) -> "SpotifyController":
@@ -168,6 +174,9 @@ class SpotifyController:
         with self._client_lock:
             if self.client is None:
                 return None
+            if self._service_in_cooldown("spotify"):
+                logger.warning("Skipping current playback request because Spotify is rate-limited")
+                return None
 
             try:
                 self._spotipy_call_count += 1
@@ -177,7 +186,8 @@ class SpotifyController:
                     logger.debug("No active Spotify playback found")
                     return None
                 return self._track_from_spotify(item)
-            except Exception:
+            except Exception as exc:
+                self._register_rate_limit("spotify", exc)
                 logger.exception("Failed to fetch current Spotify playback")
                 return None
 
@@ -187,11 +197,15 @@ class SpotifyController:
             return
 
         with self._client_lock:
+            if self._service_in_cooldown("spotify"):
+                logger.warning("Skipping queue/next-track request because Spotify is rate-limited")
+                return
             try:
                 self.client.add_to_queue(snapshot.queue[0].uri)
                 self.client.next_track()
                 logger.info("Queued and skipped to recommended track: %s", snapshot.queue[0].name)
-            except Exception:
+            except Exception as exc:
+                self._register_rate_limit("spotify", exc)
                 logger.exception("Failed to queue or skip to the recommended Spotify track")
 
     def apply_queue_to_spotify(self, max_tracks: int | None = None) -> int:
@@ -208,6 +222,9 @@ class SpotifyController:
         queued = 0
         with self._client_lock:
             for track in desired_tracks:
+                if self._service_in_cooldown("spotify"):
+                    logger.warning("Stopping queue updates because Spotify is rate-limited")
+                    break
                 if track.track_id in existing_ids:
                     logger.debug("Skipping already-present Spotify queue track: %s", track.name)
                     continue
@@ -216,8 +233,12 @@ class SpotifyController:
                     existing_ids.add(track.track_id)
                     queued += 1
                     logger.info("Added score-aware track to Spotify queue: %s", track.name)
-                except Exception:
+                except Exception as exc:
+                    self._register_rate_limit("spotify", exc)
                     logger.exception("Failed to add recommended track to Spotify queue: %s", track.name)
+                    if self._service_in_cooldown("spotify"):
+                        logger.warning("Aborting remaining queue additions after Spotify rate limit response")
+                        break
 
         logger.info("Applied %d score-aware tracks to Spotify", queued)
         return queued
@@ -226,10 +247,14 @@ class SpotifyController:
         with self._client_lock:
             if self.client is None:
                 return []
+            if self._service_in_cooldown("spotify"):
+                logger.warning("Skipping Spotify queue fetch because Spotify is rate-limited")
+                return []
 
             try:
                 response = self.client.queue()
-            except Exception:
+            except Exception as exc:
+                self._register_rate_limit("spotify", exc)
                 logger.exception("Failed to fetch current Spotify queue")
                 return []
 
@@ -271,6 +296,9 @@ class SpotifyController:
     def _build_taste_profile(self) -> TasteProfile:
         if self.client is None:
             return TasteProfile()
+        if self._service_in_cooldown("spotify"):
+            logger.warning("Skipping taste profile refresh because Spotify is rate-limited")
+            return self._cached_profile or TasteProfile()
 
         now = datetime.now()
         if (
@@ -281,11 +309,16 @@ class SpotifyController:
             logger.debug("Returning cached taste profile (age=%.0fs)", (now - self._profile_cached_at).total_seconds())
             return self._cached_profile
 
-        with self._client_lock:
-            self._spotipy_call_count += 3
-            recent = self.client.current_user_recently_played(limit=15)
-            top_tracks = self.client.current_user_top_tracks(limit=10, time_range="short_term")
-            top_artists = self.client.current_user_top_artists(limit=10, time_range="short_term")
+        try:
+            with self._client_lock:
+                self._spotipy_call_count += 3
+                recent = self.client.current_user_recently_played(limit=15)
+                top_tracks = self.client.current_user_top_tracks(limit=10, time_range="short_term")
+                top_artists = self.client.current_user_top_artists(limit=10, time_range="short_term")
+        except Exception as exc:
+            self._register_rate_limit("spotify", exc)
+            logger.exception("Failed to build Spotify taste profile")
+            return self._cached_profile or TasteProfile()
 
         profile = TasteProfile()
 
@@ -323,6 +356,9 @@ class SpotifyController:
     ) -> list[TrackSummary]:
         if self.client is None:
             return []
+        if self._service_in_cooldown("spotify"):
+            logger.warning("Skipping candidate search because Spotify is rate-limited")
+            return []
 
         score = clamp_score(ema_score)
         state_label = fatigue_state_from_score(score)
@@ -348,6 +384,9 @@ class SpotifyController:
             excluded.add(current_track.track_id)
 
         for index, query in enumerate(queries):
+            if self._service_in_cooldown("spotify"):
+                logger.warning("Stopping candidate search loop because Spotify is rate-limited")
+                break
             try:
                 logger.debug("Spotify search query for score=%.2f (%s): %s", score, state_label, query)
                 offset = self._query_offset(index)
@@ -360,8 +399,12 @@ class SpotifyController:
                         offset=offset,
                         market="US",
                     )
-            except Exception:
+            except Exception as exc:
+                self._register_rate_limit("spotify", exc)
                 logger.warning("Spotify search failed for query=%s", query, exc_info=True)
+                if self._service_in_cooldown("spotify"):
+                    logger.warning("Aborting remaining Spotify searches after rate limit response")
+                    break
                 continue
 
             items = ((response or {}).get("tracks") or {}).get("items") or []
@@ -430,17 +473,21 @@ class SpotifyController:
         result: dict[str, dict[str, float] | None] = {}
         missing = [track_id for track_id in unique_ids if track_id not in self._feature_cache]
 
+        if self._service_in_cooldown("reccobeats"):
+            logger.warning("Skipping audio feature fetch because Reccobeats is rate-limited")
+            return {track_id: self._feature_cache.get(track_id) for track_id in unique_ids}
+
         for start in range(0, len(missing), RECCOBEATS_BATCH_SIZE):
+            if self._service_in_cooldown("reccobeats"):
+                logger.warning("Stopping audio feature batch loop because Reccobeats is rate-limited")
+                break
             batch = missing[start : start + RECCOBEATS_BATCH_SIZE]
             batch_features = self._fetch_reccobeats_batch(batch)
             for track_id in batch:
-                self._feature_cache[track_id] = batch_features.get(track_id)
+                if track_id in batch_features:
+                    self._feature_cache[track_id] = batch_features.get(track_id)
 
         for track_id in unique_ids:
-            feature = self._feature_cache.get(track_id)
-            if feature is None and track_id in self._feature_cache:
-                feature = self._retry_reccobeats_single(track_id)
-                self._feature_cache[track_id] = feature
             result[track_id] = self._feature_cache.get(track_id)
 
         return result
@@ -459,9 +506,10 @@ class SpotifyController:
             )
             response.raise_for_status()
             payload = response.json()
-        except Exception:
+        except Exception as exc:
+            self._register_rate_limit("reccobeats", exc)
             logger.warning("Reccobeats batch request failed for %d track ids", len(track_ids), exc_info=True)
-            return {track_id: None for track_id in track_ids}
+            return {}
 
         parsed = self._parse_reccobeats_payload(payload)
         logger.debug("Reccobeats returned features for %d/%d tracks", len(parsed), len(track_ids))
@@ -487,6 +535,81 @@ class SpotifyController:
         if feature is None:
             logger.debug("Reccobeats returned no matching feature payload for track_id=%s", track_id)
         return feature
+
+    def _service_in_cooldown(self, service: str) -> bool:
+        limited_until = (
+            self._spotify_rate_limited_until
+            if service == "spotify"
+            else self._reccobeats_rate_limited_until
+        )
+        if limited_until is None:
+            return False
+
+        now = datetime.now()
+        if now >= limited_until:
+            if service == "spotify":
+                self._spotify_rate_limited_until = None
+            else:
+                self._reccobeats_rate_limited_until = None
+            logger.info("%s cooldown expired; API calls resumed", service.capitalize())
+            return False
+
+        return True
+
+    def _register_rate_limit(self, service: str, exc_info: BaseException | None = None) -> None:
+        if exc_info is None or not self._is_rate_limit_error(exc_info):
+            return
+
+        default_seconds = (
+            DEFAULT_SPOTIFY_RATE_LIMIT_SECONDS
+            if service == "spotify"
+            else DEFAULT_RECCOBEATS_RATE_LIMIT_SECONDS
+        )
+        retry_after_seconds = self._extract_retry_after_seconds(exc_info, default_seconds)
+        limited_until = datetime.now() + timedelta(seconds=retry_after_seconds)
+
+        if service == "spotify":
+            current = self._spotify_rate_limited_until
+            if current is None or limited_until > current:
+                self._spotify_rate_limited_until = limited_until
+        else:
+            current = self._reccobeats_rate_limited_until
+            if current is None or limited_until > current:
+                self._reccobeats_rate_limited_until = limited_until
+
+        logger.warning(
+            "%s rate limited; backing off for %ds",
+            service.capitalize(),
+            retry_after_seconds,
+        )
+
+    def _is_rate_limit_error(self, exc_info: BaseException) -> bool:
+        response = getattr(exc_info, "response", None)
+        if response is not None and getattr(response, "status_code", None) == 429:
+            return True
+
+        if getattr(exc_info, "http_status", None) == 429:
+            return True
+
+        return False
+
+    def _extract_retry_after_seconds(self, exc_info: BaseException, default_seconds: int) -> int:
+        retry_after_value = None
+
+        response = getattr(exc_info, "response", None)
+        if response is not None:
+            retry_after_value = response.headers.get("Retry-After")
+
+        if retry_after_value is None:
+            headers = getattr(exc_info, "headers", None) or {}
+            retry_after_value = headers.get("Retry-After")
+
+        try:
+            retry_after_seconds = int(float(retry_after_value)) if retry_after_value is not None else default_seconds
+        except (TypeError, ValueError):
+            retry_after_seconds = default_seconds
+
+        return max(1, min(retry_after_seconds, MAX_RATE_LIMIT_SECONDS))
 
     def _parse_reccobeats_payload(self, payload: dict[str, Any]) -> dict[str, dict[str, float]]:
         parsed: dict[str, dict[str, float]] = {}

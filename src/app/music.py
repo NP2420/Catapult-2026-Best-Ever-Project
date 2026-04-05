@@ -173,8 +173,9 @@ class StudyBuddyController(QObject):
         applied_count = self.spotify.apply_queue_to_spotify(
             max_tracks=self.config.spotify_recommendation_limit,
         )
-        if should_switch_song:
-            self.spotify.queue_top_track()
+        if should_switch_song: # NOT HAPPENING!!!
+            # self.spotify.queue_top_track()
+            pass
         return snapshot.last_refresh, applied_count, should_switch_song
 
     def _collect_completed_refresh(self) -> None:
