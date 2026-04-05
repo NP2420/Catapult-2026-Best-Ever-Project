@@ -218,6 +218,11 @@ __marimo__/
 # Spotify Cache
 .spotify-study-buddy-cache
 
+src/ml-emotions/
+src/ml-emotions-alt/
+src/ml-focus/
+src/ml-focus-alt/
+
 # machine-learning data directories
 src/machine-learning/DAiSEE/
 src/machine-learning/DAiSEE_crops/
