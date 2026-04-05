@@ -29,6 +29,13 @@ SEARCH_LIMIT_PER_QUERY = 10
 RECCOBEATS_BATCH_SIZE = 8
 RECCOBEATS_TIMEOUT_SECONDS = 10
 
+MOOD_GENRES: dict[MoodLabel, list[str]] = {
+    MoodLabel.FOCUSED: ["study", "ambient", "chill", "classical"],
+    MoodLabel.TIRED: ["pop", "dance", "electronic", "house"],
+    MoodLabel.BORED: ["indie", "rock", "electropop", "alt-rock"],
+    MoodLabel.FRUSTRATED: ["acoustic", "piano", "ambient", "chill"],
+}
+
 
 @dataclass(slots=True)
 class SpotifySnapshot:
@@ -40,9 +47,8 @@ class SpotifySnapshot:
 @dataclass(slots=True)
 class TasteProfile:
     recent_track_ids: list[str] = field(default_factory=list)
-    recent_artist_ids: list[str] = field(default_factory=list)
-    recent_artist_names: list[str] = field(default_factory=list)
     top_track_ids: list[str] = field(default_factory=list)
+    top_artist_ids: list[str] = field(default_factory=list)
     top_artist_names: list[str] = field(default_factory=list)
 
     @property
@@ -51,8 +57,7 @@ class TasteProfile:
 
     @property
     def seed_artist_names(self) -> list[str]:
-        combined = self.recent_artist_names + self.top_artist_names
-        return list(dict.fromkeys(name for name in combined if name))
+        return list(dict.fromkeys(name for name in self.top_artist_names if name))
 
 
 class SpotifyController:
@@ -82,8 +87,8 @@ class SpotifyController:
             profile = self._build_taste_profile()
             if not self._profile_logged:
                 logger.info(
-                    "Initialized taste profile with %d recent artists and %d recent tracks",
-                    len(profile.recent_artist_names),
+                    "Initialized taste profile with %d top artists from the past month and %d recent tracks",
+                    len(profile.top_artist_names),
                     len(profile.recent_track_ids),
                 )
                 self._profile_logged = True
@@ -215,13 +220,6 @@ class SpotifyController:
             track_id = track.get("id")
             if track_id and track_id not in profile.recent_track_ids:
                 profile.recent_track_ids.append(track_id)
-            for artist in track.get("artists", []):
-                artist_id = artist.get("id")
-                artist_name = artist.get("name")
-                if artist_id and artist_id not in profile.recent_artist_ids:
-                    profile.recent_artist_ids.append(artist_id)
-                if artist_name and artist_name not in profile.recent_artist_names:
-                    profile.recent_artist_names.append(artist_name)
 
         for track in top_tracks.get("items", []):
             track_id = track.get("id")
@@ -229,14 +227,17 @@ class SpotifyController:
                 profile.top_track_ids.append(track_id)
 
         for artist in top_artists.get("items", []):
+            artist_id = artist.get("id")
             artist_name = artist.get("name")
+            if artist_id and artist_id not in profile.top_artist_ids:
+                profile.top_artist_ids.append(artist_id)
             if artist_name and artist_name not in profile.top_artist_names:
                 profile.top_artist_names.append(artist_name)
 
         logger.debug(
-            "Built taste profile: %d recent tracks, %d recent artists, %d top artists",
+            "Built taste profile: %d recent tracks, %d top tracks, %d top artists",
             len(profile.recent_track_ids),
-            len(profile.recent_artist_names),
+            len(profile.top_track_ids),
             len(profile.top_artist_names),
         )
         return profile
@@ -274,10 +275,16 @@ class SpotifyController:
 
     def _candidate_queries_for_mood(self, mood: MoodLabel, profile: TasteProfile) -> list[str]:
         artist_names = profile.seed_artist_names[:4]
+        genres = MOOD_GENRES[mood][:3]
 
         queries: list[str] = []
+        for genre in genres:
+            queries.append(f"genre:{genre}")
         for artist_name in artist_names:
             queries.append(f'artist:"{artist_name}"')
+        for artist_name in artist_names[:2]:
+            for genre in genres[:2]:
+                queries.append(f'artist:"{artist_name}" genre:{genre}')
 
         return list(dict.fromkeys(queries))
 
