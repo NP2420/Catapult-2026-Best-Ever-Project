@@ -40,8 +40,8 @@ SEARCH_OFFSET_STEP = 10
 SEARCH_OFFSET_CYCLE = 3
 RECENT_RECOMMENDATION_HISTORY = 80
 RECENT_ARTIST_HISTORY = 80
-TASTE_PROFILE_TTL_SECONDS = 300
-CANDIDATE_CACHE_TTL_SECONDS = 300
+TASTE_PROFILE_TTL_SECONDS = 600
+CANDIDATE_CACHE_TTL_SECONDS = 600
 
 AWAKE_GENRES = ["study", "ambient", "chill", "classical"]
 DROWSY_GENRES = ["lofi", "indie", "electropop", "alt-rock"]
@@ -85,10 +85,9 @@ class SpotifyController:
         self._recent_recommendation_artists: deque[str] = deque(maxlen=RECENT_ARTIST_HISTORY)
         self._cached_profile: TasteProfile | None = None
         self._profile_cached_at: datetime | None = None
-        self._cached_fatigue_state: str | None = None
-        self._cached_candidates: list[TrackSummary] = []
-        self._candidates_cached_at: datetime | None = None
+        self._candidate_cache: dict[str, tuple[list[TrackSummary], datetime]] = {}
         self._spotipy_call_count = 0
+        self._reccobeats_call_count = 0
 
     @classmethod
     def from_config(cls, config: AppConfig) -> "SpotifyController":
@@ -96,6 +95,7 @@ class SpotifyController:
 
     def refresh_for_score(self, ema_score: float, limit: int = 4) -> SpotifySnapshot:
         self._spotipy_call_count = 0
+        self._reccobeats_call_count = 0
         score = clamp_score(ema_score)
         state_label = fatigue_state_from_score(score)
         limit = limit or self.recommendation_limit
@@ -111,7 +111,7 @@ class SpotifyController:
                 last_refresh=datetime.now(),
             )
             self._set_snapshot(snapshot)
-            logger.info("refresh_for_score made %d spotipy API request(s)", self._spotipy_call_count)
+            logger.info("refresh_for_score made %d spotipy and %d reccobeats API request(s)", self._spotipy_call_count, self._reccobeats_call_count)
             return snapshot
 
         try:
@@ -147,7 +147,7 @@ class SpotifyController:
                 len(snapshot.queue),
                 len(candidates),
             )
-            logger.info("refresh_for_score made %d spotipy API request(s)", self._spotipy_call_count)
+            logger.info("refresh_for_score made %d spotipy and %d reccobeats API request(s)", self._spotipy_call_count, self._reccobeats_call_count)
             return snapshot
         except Exception:
             logger.exception("Spotify search/rerank refresh failed for score=%.2f (%s)", score, state_label)
@@ -157,7 +157,7 @@ class SpotifyController:
                 last_refresh=datetime.now(),
             )
             self._set_snapshot(snapshot)
-            logger.info("refresh_for_score made %d spotipy API request(s)", self._spotipy_call_count)
+            logger.info("refresh_for_score made %d spotipy and %d reccobeats API request(s)", self._spotipy_call_count, self._reccobeats_call_count)
             return snapshot
 
     def current_playback(self) -> TrackSummary | None:
@@ -320,19 +320,17 @@ class SpotifyController:
         state_label = fatigue_state_from_score(score)
 
         now = datetime.now()
-        if (
-            self._cached_fatigue_state == state_label
-            and self._cached_candidates
-            and self._candidates_cached_at is not None
-            and (now - self._candidates_cached_at).total_seconds() < CANDIDATE_CACHE_TTL_SECONDS
-        ):
-            logger.info(
-                "Reusing %d cached candidates for state=%s (age=%.0fs)",
-                len(self._cached_candidates),
-                state_label,
-                (now - self._candidates_cached_at).total_seconds(),
-            )
-            return list(self._cached_candidates)
+        cached = self._candidate_cache.get(state_label)
+        if cached is not None:
+            cached_candidates, cached_at = cached
+            if cached_candidates and (now - cached_at).total_seconds() < CANDIDATE_CACHE_TTL_SECONDS:
+                logger.info(
+                    "Reusing %d cached candidates for state=%s (age=%.0fs)",
+                    len(cached_candidates),
+                    state_label,
+                    (now - cached_at).total_seconds(),
+                )
+                return list(cached_candidates)
 
         queries = self._candidate_queries_for_score(score, profile)
         candidates: list[TrackSummary] = []
@@ -367,9 +365,16 @@ class SpotifyController:
                 candidates.append(track)
 
         logger.info("Collected %d candidate tracks for score=%.2f (%s)", len(candidates), score, state_label)
-        self._cached_fatigue_state = state_label
-        self._cached_candidates = list(candidates)
-        self._candidates_cached_at = datetime.now()
+
+        feature_map = self._fetch_audio_features_with_retry([t.track_id for t in candidates])
+        for track in candidates:
+            features = feature_map.get(track.track_id)
+            if features:
+                track.energy = features.get("energy", track.energy)
+                track.tempo = features.get("tempo", track.tempo)
+                track.valence = features.get("valence", track.valence)
+
+        self._candidate_cache[state_label] = (list(candidates), datetime.now())
         return candidates
 
     def _candidate_queries_for_score(self, ema_score: float, profile: TasteProfile) -> list[str]:
@@ -399,18 +404,13 @@ class SpotifyController:
 
         score = clamp_score(ema_score)
         state_label = fatigue_state_from_score(score)
-        feature_map = self._fetch_audio_features_with_retry([track.track_id for track in candidates])
         ranked: list[tuple[float, TrackSummary]] = []
 
         for track in candidates:
-            ranking_score = self._score_track(score, track, feature_map.get(track.track_id), profile)
+            features = self._feature_cache.get(track.track_id)
+            ranking_score = self._score_track(score, track, features, profile)
             if ranking_score is None:
                 continue
-            features = feature_map.get(track.track_id)
-            if features:
-                track.energy = features.get("energy", track.energy)
-                track.tempo = features.get("tempo", track.tempo)
-                track.valence = features.get("valence", track.valence)
             ranked.append((ranking_score, track))
 
         ranked.sort(key=lambda item: item[0], reverse=True)
@@ -442,6 +442,7 @@ class SpotifyController:
             return {}
 
         try:
+            self._reccobeats_call_count += 1
             response = requests.get(
                 RECCOBEATS_AUDIO_FEATURES_URL,
                 params={"ids": ",".join(track_ids)},
@@ -460,6 +461,7 @@ class SpotifyController:
 
     def _retry_reccobeats_single(self, track_id: str) -> dict[str, float] | None:
         try:
+            self._reccobeats_call_count += 1
             response = requests.get(
                 RECCOBEATS_AUDIO_FEATURES_URL,
                 params={"ids": track_id},
