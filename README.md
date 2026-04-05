@@ -85,6 +85,8 @@ Daniel was primarily responsible for the app functionality and Spotify API integ
 
 Both Nathan and I ran into significant challenges. The most significant one for me was realizing less than 15 hours before the submission deadline that the spotify API endpoint for recommendations was deprecated. This led to me needing to design an entirely custom recommendation system using the limited SpotifyAPI endpoints available, and though it isn’t as polished as Spotify's algorithm, it worked enough to develop this MVP.
 
+Another thing that was kinda funny was that our initial Spotify developer portal app timed out for a full 24 hours because I guess we spammed the API endpoints way too many times during development and didn't have proper retry logic. So that took a while to fix, but it resulted in a cool caching system and significantly reducing the amount of requests we were making.
+
 The initial dataset Nathan chose, as well as the model architecture, did not yield great results in the beginning. This may have been due to it being multiclass classification, as well as training from scratch. He made the decision to downscope the ML side, opting for a fine-tuning approach and a simpler output value, which ended up yielding great results, as our model performs very well at detecting alertness and drowsiness, even when running purely on local machines.
 
 ## Accomplishments that we're proud of
