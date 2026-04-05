@@ -50,6 +50,7 @@ class StudyBuddyController(QObject):
         self.last_tick = datetime.now()
         self.last_queue_refresh: datetime | None = None
         self.queue_refresh_interval = timedelta(seconds=config.queue_refresh_seconds)
+        self.minimum_queue_refresh_interval = timedelta(seconds=config.minimum_queue_refresh_seconds)
         self._refresh_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spotify-refresh")
         self._pending_refresh: Future[tuple[datetime | None, int, bool]] | None = None
 
@@ -82,7 +83,7 @@ class StudyBuddyController(QObject):
         decision = self.productivity.tick(sample.prediction.ema_score, elapsed)
 
         needs_refresh = decision.should_refresh_queue or self._queue_refresh_due(now)
-        if needs_refresh and not self.productivity.break_state.active:
+        if needs_refresh and not self.productivity.break_state.active and self._queue_refresh_allowed(now):
             state_label = fatigue_state_from_score(sample.prediction.ema_score)
             logger.debug(
                 "Refreshing queue for score=%.2f (%s), switch_song=%s",
@@ -94,6 +95,11 @@ class StudyBuddyController(QObject):
                 sample.prediction.ema_score,
                 should_switch_song=decision.should_switch_song,
                 reason="fatigue trigger" if decision.should_switch_song else "scheduled refresh",
+            )
+        elif needs_refresh and not self.productivity.break_state.active:
+            logger.debug(
+                "Skipping Spotify refresh because minimum interval of %.0fs has not elapsed",
+                self.minimum_queue_refresh_interval.total_seconds(),
             )
 
         spotify_snapshot = self.spotify.get_snapshot()
@@ -114,6 +120,11 @@ class StudyBuddyController(QObject):
         if self.last_queue_refresh is None:
             return True
         return (now - self.last_queue_refresh) >= self.queue_refresh_interval
+
+    def _queue_refresh_allowed(self, now: datetime) -> bool:
+        if self.last_queue_refresh is None:
+            return True
+        return (now - self.last_queue_refresh) >= self.minimum_queue_refresh_interval
 
     def _schedule_refresh(self, ema_score: float, should_switch_song: bool, reason: str) -> None:
         if self._pending_refresh and not self._pending_refresh.done():

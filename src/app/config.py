@@ -36,7 +36,8 @@ class AppConfig:
     - mood_poll_interval_seconds: How often to poll the webcam for mood updates.
     - mood_smoothing_window: Number of recent mood samples to smooth over for stability.
     - controller_tick_interval_ms: How often the main controller should update (in milliseconds).
-    - queue_refresh_seconds: Minimum time between Spotify queue refreshes.
+    - queue_refresh_seconds: How often to attempt the periodic Spotify queue refresh.
+    - minimum_queue_refresh_seconds: Minimum time between any Spotify queue refreshes.
     - spotify_recommendation_limit: Number of tracks to request from Spotify for each mood refresh.
     - short_term_threshold_seconds: Fatigue threshold for short-term breaks.
     - long_term_threshold_seconds: Fatigue threshold for long-term breaks.
@@ -55,6 +56,7 @@ class AppConfig:
     mood_smoothing_window: int
     controller_tick_interval_ms: int
     queue_refresh_seconds: int
+    minimum_queue_refresh_seconds: int
     spotify_recommendation_limit: int
     short_term_threshold_seconds: int
     long_term_threshold_seconds: int
@@ -79,8 +81,9 @@ def load_app_config() -> AppConfig:
         mood_poll_interval_seconds=_env_float("STUDY_BUDDY_MOOD_POLL_SECONDS", 1.0),
         mood_smoothing_window=_env_int("STUDY_BUDDY_MOOD_SMOOTHING_WINDOW", 10),
         controller_tick_interval_ms=_env_int("STUDY_BUDDY_TICK_MS", 1000),
-        queue_refresh_seconds=_env_int("STUDY_BUDDY_QUEUE_REFRESH_SECONDS", 45),
-        spotify_recommendation_limit=_env_int("STUDY_BUDDY_SPOTIFY_LIMIT", 1),
+        queue_refresh_seconds=_env_int("STUDY_BUDDY_QUEUE_REFRESH_SECONDS", 240),
+        minimum_queue_refresh_seconds=_env_int("STUDY_BUDDY_MIN_QUEUE_REFRESH_SECONDS", 120),
+        spotify_recommendation_limit=_env_int("STUDY_BUDDY_SPOTIFY_LIMIT", 2),
         short_term_threshold_seconds=_env_int("STUDY_BUDDY_SHORT_TERM_THRESHOLD", 15),
         long_term_threshold_seconds=_env_int("STUDY_BUDDY_LONG_TERM_THRESHOLD", 90),
         minimum_break_seconds=_env_int("STUDY_BUDDY_MIN_BREAK_SECONDS", 300),

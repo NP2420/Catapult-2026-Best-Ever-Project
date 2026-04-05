@@ -405,7 +405,7 @@ class BuddyWindow(QWidget):
         )
         self._update_break(snapshot.break_state)
         self._last_update_label.setText(
-            "Queue refresh: "
+            "Last queue refresh: "
             + (
                 snapshot.last_queue_refresh.strftime("%I:%M:%S %p")
                 if snapshot.last_queue_refresh
