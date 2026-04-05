@@ -1,97 +1,116 @@
 from __future__ import annotations
 
 import logging
-import random
+import os
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 from .config import AppConfig
-from .models import MoodLabel, MoodPrediction
+from .models import MoodPrediction, clamp_score
 
 
 logger = logging.getLogger(__name__)
 
 
-def predict_mood_from_image(frame: np.ndarray) -> MoodPrediction:
-    """Dummy seam for the future model.
-
-    Replace the heuristic block with a real model call that returns the same
-    MoodPrediction shape. The rest of the app only depends on this function.
-
-    Args:
-        frame: A single video frame captured from the webcam.
-    Returns:
-        A MoodPrediction containing the predicted mood, confidence, and probabilities.
-    """
-
-    resized = cv2.resize(frame, (96, 96))
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-
-    brightness = float(np.mean(gray)) / 255.0
-    motion = float(np.std(gray)) / 255.0
-
-    probabilities = {
-        MoodLabel.FOCUSED: max(0.05, 0.55 + (motion * 0.2) - abs(brightness - 0.5)),
-        MoodLabel.TIRED: max(0.05, 0.55 - brightness + 0.15),
-        MoodLabel.BORED: max(0.05, 0.4 + (0.18 - motion)),
-        MoodLabel.FRUSTRATED: max(0.05, 0.25 + abs(brightness - 0.5) + (motion * 0.15)),
-    }
-
-    total = sum(probabilities.values())
-    normalized = {mood: value / total for mood, value in probabilities.items()}
-    best_mood = max(normalized, key=normalized.get)
-    confidence = normalized[best_mood]
-
-    return MoodPrediction(
-        mood=best_mood,
-        confidence=confidence,
-        probabilities=normalized,
+YOLO_CLASSES = ["closed_eye", "closed_mouth", "open_eye", "open_mouth"]
+EYE_WEIGHT = 0.7
+MOUTH_WEIGHT = 0.3
+EMA_ALPHA = 0.15
+WINDOW_SECS = 5.0
+YOLO_CONFIDENCE_THRESHOLD = 0.40
+YOLO_IOU_THRESHOLD = 0.45
+DEFAULT_EMA_SCORE = 0.2
+YOLO_CHECKPOINT = Path(
+    os.getenv(
+        "STUDY_BUDDY_YOLO_CKPT",
+        str(Path(__file__).resolve().parents[1] / "ml-focus" / "best.pt"),
     )
+)
+
+_INFERENCE_LOCK = threading.Lock()
+_MODEL: YOLO | None = None
+_MODEL_LOAD_FAILED = False
+_EMA_SCORE = DEFAULT_EMA_SCORE
+_SCORE_HISTORY: deque[tuple[float, float]] = deque()
 
 
-class MoodSmoother:
+def predict_mood_from_image(frame: np.ndarray) -> MoodPrediction:
     """
-    Smooths mood predictions over a sliding window to reduce noise and provide more stable predictions.
-    The smoother maintains a fixed-size deque of recent predictions and averages their probabilities
-    
-    Requires a thread lock because the 
+    Run the realtime tiredness pipeline on a single webcam frame.
+
+    The caller already provides the raw frame, so the entire YOLO inference,
+    tiredness scoring, EMA smoothing, and rolling-average update happen here.
     """
-    
-    def __init__(self, window_size: int = 10) -> None:
-        self._window: deque[MoodPrediction] = deque(maxlen=window_size)
-        self._lock = threading.Lock()
 
-    def add(self, prediction: MoodPrediction) -> MoodPrediction:
-        """
-        Add a new mood prediction to the sliding window and return the smoothed prediction.
+    global _MODEL, _MODEL_LOAD_FAILED, _EMA_SCORE
 
-        Args:
-            prediction: A MoodPrediction instance to add to the window.
+    with _INFERENCE_LOCK:
+        if _MODEL is None and not _MODEL_LOAD_FAILED:
+            if not YOLO_CHECKPOINT.exists():
+                logger.error("YOLO checkpoint not found at %s", YOLO_CHECKPOINT)
+                _MODEL_LOAD_FAILED = True
+            else:
+                logger.info("Loading realtime tiredness model from %s", YOLO_CHECKPOINT)
+                _MODEL = YOLO(str(YOLO_CHECKPOINT))
+                _MODEL.fuse()
 
-        Returns:
-            A MoodPrediction instance representing the smoothed prediction.
-        """
-        with self._lock:
-            self._window.append(prediction)
-            grouped: dict[MoodLabel, float] = {mood: 0.0 for mood in MoodLabel}
-            for item in self._window:
-                for mood, score in item.probabilities.items():
-                    grouped[mood] += score
+        raw_score = DEFAULT_EMA_SCORE if _MODEL is None else 0.0
+        face_detected = False
 
-            total = sum(grouped.values()) or 1.0
-            normalized = {mood: score / total for mood, score in grouped.items()}
-            best_mood = max(normalized, key=normalized.get)
+        if _MODEL is not None:
+            try:
+                results = _MODEL.predict(
+                    frame,
+                    conf=YOLO_CONFIDENCE_THRESHOLD,
+                    iou=YOLO_IOU_THRESHOLD,
+                    verbose=False,
+                    stream=False,
+                )[0]
 
-            return MoodPrediction(
-                mood=best_mood,
-                confidence=normalized[best_mood],
-                probabilities=normalized,
-            )
+                boxes = results.boxes
+                face_detected = boxes is not None and len(boxes) > 0
+
+                if face_detected:
+                    class_names = [YOLO_CLASSES[int(class_index)] for class_index in boxes.cls]
+                    closed_eyes = class_names.count("closed_eye")
+                    open_eyes = class_names.count("open_eye")
+                    open_mouths = class_names.count("open_mouth")
+                    closed_mouths = class_names.count("closed_mouth")
+
+                    eye_score = closed_eyes / max(closed_eyes + open_eyes, 1)
+                    mouth_score = open_mouths / max(open_mouths + closed_mouths, 1)
+                    raw_score = (EYE_WEIGHT * eye_score) + (MOUTH_WEIGHT * mouth_score)
+            except Exception:
+                logger.exception("Realtime YOLO inference failed; returning fallback tiredness score")
+                raw_score = DEFAULT_EMA_SCORE
+                face_detected = False
+
+        _EMA_SCORE = clamp_score((EMA_ALPHA * raw_score) + ((1.0 - EMA_ALPHA) * _EMA_SCORE))
+
+        now = time.time()
+        _SCORE_HISTORY.append((now, _EMA_SCORE))
+        while _SCORE_HISTORY and _SCORE_HISTORY[0][0] < now - WINDOW_SECS:
+            _SCORE_HISTORY.popleft()
+
+        rolling_score = (
+            sum(score for _, score in _SCORE_HISTORY) / len(_SCORE_HISTORY)
+            if _SCORE_HISTORY
+            else _EMA_SCORE
+        )
+
+        return MoodPrediction(
+            raw_score=raw_score,
+            ema_score=_EMA_SCORE,
+            rolling_score=rolling_score,
+            face_detected=face_detected,
+        )
 
 
 @dataclass(slots=True)
@@ -101,12 +120,14 @@ class WebcamSample:
     available: bool
 
 
-class WebcamMoodMonitor:
+class WebcamInferenceMonitor:
     """
-    Captures video frames from the webcam, predicts the user's mood using a model, and smooths predictions over time.
-    The monitor runs in a separate thread to continuously update the mood prediction without blocking the main application.
+    Capture webcam frames and publish realtime tiredness predictions.
+
+    The prediction function owns the entire model pipeline, so this monitor
+    only handles camera I/O, threading, and the latest sample state.
     """
-    
+
     def __init__(
         self,
         camera_index: int = 0,
@@ -115,24 +136,25 @@ class WebcamMoodMonitor:
     ) -> None:
         self.camera_index = camera_index
         self.interval_seconds = interval_seconds
-        self.smoother = MoodSmoother(window_size=smoothing_window)
+        self.smoothing_window = max(1, smoothing_window)
         self._latest_sample = WebcamSample(
             frame=None,
             prediction=MoodPrediction(
-                mood=MoodLabel.FOCUSED,
-                confidence=1.0,
-                probabilities={mood: 1.0 if mood is MoodLabel.FOCUSED else 0.0 for mood in MoodLabel},
+                raw_score=DEFAULT_EMA_SCORE,
+                ema_score=DEFAULT_EMA_SCORE,
+                rolling_score=DEFAULT_EMA_SCORE,
+                face_detected=False,
             ),
             available=False,
         )
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None # create a thread for the webcam capture loop
+        self._thread: threading.Thread | None = None
         self._last_availability: bool | None = None
-        self._last_mood: MoodLabel | None = None
+        self._last_state_label: str | None = None
 
     @classmethod
-    def from_config(cls, config: AppConfig) -> "WebcamMoodMonitor":
+    def from_config(cls, config: AppConfig) -> "WebcamInferenceMonitor":
         return cls(
             camera_index=config.camera_index,
             interval_seconds=config.mood_poll_interval_seconds,
@@ -140,14 +162,11 @@ class WebcamMoodMonitor:
         )
 
     def start(self) -> None:
-        """
-        Start the webcam mood monitor in a separate thread.
-        """
-        
         if self._thread and self._thread.is_alive():
             return
+
         logger.info(
-            "Starting webcam mood monitor",
+            "Starting webcam inference monitor",
             extra={
                 "camera_index": self.camera_index,
                 "interval_seconds": self.interval_seconds,
@@ -158,7 +177,7 @@ class WebcamMoodMonitor:
         self._thread.start()
 
     def stop(self) -> None:
-        logger.info("Stopping webcam mood monitor")
+        logger.info("Stopping webcam inference monitor")
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=2)
@@ -168,14 +187,11 @@ class WebcamMoodMonitor:
             return self._latest_sample
 
     def _run(self) -> None:
-        """
-        The main loop that captures video frames from the webcam, predicts the user's mood, 
-        and updates the latest sample. This loop runs until the stop event is set.
-        """
         capture = cv2.VideoCapture(self.camera_index)
         try:
             if not capture.isOpened():
                 logger.warning("Webcam could not be opened, using fallback predictions")
+
             while not self._stop_event.is_set():
                 ok, frame = capture.read()
                 if not ok or frame is None:
@@ -185,8 +201,7 @@ class WebcamMoodMonitor:
                     continue
 
                 prediction = predict_mood_from_image(frame)
-                smoothed = self.smoother.add(prediction)
-                self._update_sample(frame, smoothed, available=True)
+                self._update_sample(frame, prediction, available=True)
                 time.sleep(self.interval_seconds)
         finally:
             capture.release()
@@ -194,19 +209,16 @@ class WebcamMoodMonitor:
 
     def _update_sample(self, frame: np.ndarray | None, prediction: MoodPrediction, available: bool) -> None:
         if available != self._last_availability:
-            logger.info(
-                "Webcam availability changed to %s",
-                "online" if available else "offline",
-            )
+            logger.info("Webcam availability changed to %s", "online" if available else "offline")
             self._last_availability = available
 
-        if prediction.mood != self._last_mood:
+        if prediction.state_label != self._last_state_label:
             logger.debug(
-                "Smoothed mood changed to %s with confidence %.2f",
-                prediction.mood.value,
-                prediction.confidence,
+                "Realtime tiredness state changed to %s (ema=%.2f)",
+                prediction.state_label,
+                prediction.ema_score,
             )
-            self._last_mood = prediction.mood
+            self._last_state_label = prediction.state_label
 
         with self._lock:
             self._latest_sample = WebcamSample(
@@ -216,11 +228,12 @@ class WebcamMoodMonitor:
             )
 
     def _fallback_prediction(self) -> MoodPrediction:
-        weights = {
-            MoodLabel.FOCUSED: 0.7,
-            MoodLabel.TIRED: 0.1,
-            MoodLabel.BORED: 0.1,
-            MoodLabel.FRUSTRATED: 0.1,
-        }
-        mood = random.choices(list(weights.keys()), weights=weights.values(), k=1)[0]
-        return MoodPrediction(mood=mood, confidence=0.55, probabilities=weights)
+        return MoodPrediction(
+            raw_score=DEFAULT_EMA_SCORE,
+            ema_score=DEFAULT_EMA_SCORE,
+            rolling_score=DEFAULT_EMA_SCORE,
+            face_detected=False,
+        )
+
+
+WebcamMoodMonitor = WebcamInferenceMonitor

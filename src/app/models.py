@@ -2,22 +2,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 
 
-class MoodLabel(StrEnum):
-    FOCUSED = "focused"
-    TIRED = "tired"
-    BORED = "bored"
-    FRUSTRATED = "frustrated"
+DROWSY_SCORE_THRESHOLD = 0.35
+TIRED_SCORE_THRESHOLD = 0.65
+
+
+def clamp_score(score: float) -> float:
+    return max(0.0, min(1.0, float(score)))
+
+
+def fatigue_state_from_score(score: float) -> str:
+    score = clamp_score(score)
+    if score < DROWSY_SCORE_THRESHOLD:
+        return "awake"
+    if score < TIRED_SCORE_THRESHOLD:
+        return "drowsy"
+    return "tired"
 
 
 @dataclass(slots=True)
 class MoodPrediction:
-    mood: MoodLabel
-    confidence: float
-    probabilities: dict[MoodLabel, float]
+    raw_score: float
+    ema_score: float
+    rolling_score: float
+    face_detected: bool
     captured_at: datetime = field(default_factory=datetime.now)
+
+    def __post_init__(self) -> None:
+        self.raw_score = clamp_score(self.raw_score)
+        self.ema_score = clamp_score(self.ema_score)
+        self.rolling_score = clamp_score(self.rolling_score)
+
+    @property
+    def state_label(self) -> str:
+        return fatigue_state_from_score(self.ema_score)
 
 
 @dataclass(slots=True)
@@ -40,10 +59,16 @@ class BreakState:
 
 @dataclass(slots=True)
 class SessionSnapshot:
-    mood: MoodLabel
-    confidence: float
+    raw_score: float
+    ema_score: float
+    rolling_score: float
+    face_detected: bool
     fatigue_seconds: float
     break_state: BreakState
     current_track: TrackSummary | None
     upcoming_tracks: list[TrackSummary]
     last_queue_refresh: datetime | None
+
+    @property
+    def state_label(self) -> str:
+        return fatigue_state_from_score(self.ema_score)

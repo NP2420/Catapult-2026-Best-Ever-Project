@@ -16,16 +16,16 @@ if __package__ in {None, ""}:
     from src.app.behavior import ProductivityEngine
     from src.app.config import AppConfig, load_app_config
     from src.app.logging_config import configure_logging
-    from src.app.models import SessionSnapshot
-    from src.app.mood import WebcamMoodMonitor
+    from src.app.models import SessionSnapshot, fatigue_state_from_score
+    from src.app.mood import WebcamInferenceMonitor
     from src.app.spotify_client import SpotifyController
     from src.app.ui import BuddyWindow
 else:
     from .behavior import ProductivityEngine
     from .config import AppConfig, load_app_config
     from .logging_config import configure_logging
-    from .models import SessionSnapshot
-    from .mood import WebcamMoodMonitor
+    from .models import SessionSnapshot, fatigue_state_from_score
+    from .mood import WebcamInferenceMonitor
     from .spotify_client import SpotifyController
     from .ui import BuddyWindow
 
@@ -38,7 +38,7 @@ class StudyBuddyController(QObject):
         super().__init__()
         self.config = config
         self.window = window
-        self.mood_monitor = WebcamMoodMonitor.from_config(config)
+        self.mood_monitor = WebcamInferenceMonitor.from_config(config)
         self.spotify = SpotifyController.from_config(config)
         self.productivity = ProductivityEngine(
             short_term_threshold_seconds=config.short_term_threshold_seconds,
@@ -60,8 +60,8 @@ class StudyBuddyController(QObject):
     def start(self) -> None:
         logger.info("Starting Study Buddy controller")
         self.mood_monitor.start()
-        initial_mood = self.mood_monitor.latest_sample().prediction.mood
-        self._schedule_refresh(initial_mood, should_switch_song=False, reason="startup")
+        initial_score = self.mood_monitor.latest_sample().prediction.ema_score
+        self._schedule_refresh(initial_score, should_switch_song=False, reason="startup")
         self.tick()
 
     def stop(self) -> None:
@@ -77,25 +77,29 @@ class StudyBuddyController(QObject):
         self.last_tick = now
 
         sample = self.mood_monitor.latest_sample()
-        decision = self.productivity.tick(sample.prediction.mood, elapsed)
+        decision = self.productivity.tick(sample.prediction.ema_score, elapsed)
 
         needs_refresh = decision.should_refresh_queue or self._queue_refresh_due(now)
         if needs_refresh and not self.productivity.break_state.active:
+            state_label = fatigue_state_from_score(sample.prediction.ema_score)
             logger.debug(
-                "Refreshing queue for mood=%s, switch_song=%s",
-                sample.prediction.mood.value,
+                "Refreshing queue for score=%.2f (%s), switch_song=%s",
+                sample.prediction.ema_score,
+                state_label,
                 decision.should_switch_song,
             )
             self._schedule_refresh(
-                sample.prediction.mood,
+                sample.prediction.ema_score,
                 should_switch_song=decision.should_switch_song,
                 reason="fatigue trigger" if decision.should_switch_song else "scheduled refresh",
             )
 
         spotify_snapshot = self.spotify.get_snapshot()
         snapshot = SessionSnapshot(
-            mood=sample.prediction.mood,
-            confidence=sample.prediction.confidence,
+            raw_score=sample.prediction.raw_score,
+            ema_score=sample.prediction.ema_score,
+            rolling_score=sample.prediction.rolling_score,
+            face_detected=sample.prediction.face_detected,
             fatigue_seconds=self.productivity.fatigue_seconds,
             break_state=self.productivity.break_state,
             current_track=spotify_snapshot.current_track,
@@ -109,21 +113,26 @@ class StudyBuddyController(QObject):
             return True
         return (now - self.last_queue_refresh) >= self.queue_refresh_interval
 
-    def _schedule_refresh(self, mood, should_switch_song: bool, reason: str) -> None:
+    def _schedule_refresh(self, ema_score: float, should_switch_song: bool, reason: str) -> None:
         if self._pending_refresh and not self._pending_refresh.done():
             logger.debug("Skipping Spotify refresh schedule because one is already running")
             return
 
-        logger.info("Scheduling Spotify refresh for mood=%s (%s)", mood.value, reason)
+        logger.info(
+            "Scheduling Spotify refresh for score=%.2f (%s, %s)",
+            ema_score,
+            fatigue_state_from_score(ema_score),
+            reason,
+        )
         self._pending_refresh = self._refresh_executor.submit(
             self._run_refresh_job,
-            mood,
+            ema_score,
             should_switch_song,
         )
 
-    def _run_refresh_job(self, mood, should_switch_song: bool) -> tuple[datetime | None, int, bool]:
-        snapshot = self.spotify.refresh_for_mood(
-            mood,
+    def _run_refresh_job(self, ema_score: float, should_switch_song: bool) -> tuple[datetime | None, int, bool]:
+        snapshot = self.spotify.refresh_for_score(
+            ema_score,
             limit=self.config.spotify_recommendation_limit,
         )
         applied_count = self.spotify.apply_queue_to_spotify(

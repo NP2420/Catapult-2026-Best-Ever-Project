@@ -13,7 +13,13 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 from .config import AppConfig
-from .models import MoodLabel, TrackSummary
+from .models import (
+    DROWSY_SCORE_THRESHOLD,
+    TIRED_SCORE_THRESHOLD,
+    TrackSummary,
+    clamp_score,
+    fatigue_state_from_score,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -35,12 +41,9 @@ SEARCH_OFFSET_CYCLE = 3
 RECENT_RECOMMENDATION_HISTORY = 80
 RECENT_ARTIST_HISTORY = 80
 
-MOOD_GENRES: dict[MoodLabel, list[str]] = {
-    MoodLabel.FOCUSED: ["study", "ambient", "chill", "classical"],
-    MoodLabel.TIRED: ["pop", "dance", "electronic", "house"],
-    MoodLabel.BORED: ["indie", "rock", "electropop", "alt-rock"],
-    MoodLabel.FRUSTRATED: ["acoustic", "piano", "ambient", "chill"],
-}
+AWAKE_GENRES = ["study", "ambient", "chill", "classical"]
+DROWSY_GENRES = ["lofi", "indie", "electropop", "alt-rock"]
+TIRED_GENRES = ["pop", "dance", "electronic", "house"]
 
 
 @dataclass(slots=True)
@@ -83,13 +86,19 @@ class SpotifyController:
     def from_config(cls, config: AppConfig) -> "SpotifyController":
         return cls(recommendation_limit=config.spotify_recommendation_limit)
 
-    def refresh_for_mood(self, mood: MoodLabel, limit: int = 4) -> SpotifySnapshot:
+    def refresh_for_score(self, ema_score: float, limit: int = 4) -> SpotifySnapshot:
+        score = clamp_score(ema_score)
+        state_label = fatigue_state_from_score(score)
         limit = limit or self.recommendation_limit
         if self.client is None:
-            logger.info("Spotify client unavailable, using fallback queue for mood=%s", mood.value)
+            logger.info(
+                "Spotify client unavailable, using fallback queue for score=%.2f (%s)",
+                score,
+                state_label,
+            )
             snapshot = SpotifySnapshot(
                 current_track=self.get_snapshot().current_track,
-                queue=self._fallback_tracks(mood, limit),
+                queue=self._fallback_tracks(score, limit),
                 last_refresh=datetime.now(),
             )
             self._set_snapshot(snapshot)
@@ -105,11 +114,11 @@ class SpotifyController:
                 )
                 self._profile_logged = True
 
-            candidates = self._search_candidate_tracks(mood, profile)
-            ranked_queue = self._rank_candidates(mood, candidates, profile, limit)
+            candidates = self._search_candidate_tracks(score, profile)
+            ranked_queue = self._rank_candidates(score, candidates, profile, limit)
             if not ranked_queue:
-                logger.warning("Search/rerank produced no candidates for mood=%s", mood.value)
-                ranked_queue = self._fallback_tracks(mood, limit)
+                logger.warning("Search/rerank produced no candidates for score=%.2f (%s)", score, state_label)
+                ranked_queue = self._fallback_tracks(score, limit)
 
             snapshot = SpotifySnapshot(
                 current_track=self.current_playback(),
@@ -120,17 +129,18 @@ class SpotifyController:
             self._refresh_generation += 1
             self._set_snapshot(snapshot)
             logger.info(
-                "Built mood queue for mood=%s with %d tracks from %d candidates",
-                mood.value,
+                "Built score-aware queue for score=%.2f (%s) with %d tracks from %d candidates",
+                score,
+                state_label,
                 len(snapshot.queue),
                 len(candidates),
             )
             return snapshot
         except Exception:
-            logger.exception("Spotify search/rerank refresh failed for mood=%s", mood.value)
+            logger.exception("Spotify search/rerank refresh failed for score=%.2f (%s)", score, state_label)
             snapshot = SpotifySnapshot(
                 current_track=self.get_snapshot().current_track,
-                queue=self._fallback_tracks(mood, limit),
+                queue=self._fallback_tracks(score, limit),
                 last_refresh=datetime.now(),
             )
             self._set_snapshot(snapshot)
@@ -186,11 +196,11 @@ class SpotifyController:
                     self.client.add_to_queue(track.uri)
                     existing_ids.add(track.track_id)
                     queued += 1
-                    logger.info("Added mood-queue track to Spotify queue: %s", track.name)
+                    logger.info("Added score-aware track to Spotify queue: %s", track.name)
                 except Exception:
                     logger.exception("Failed to add recommended track to Spotify queue: %s", track.name)
 
-        logger.info("Applied %d tracks from the mood queue to Spotify", queued)
+        logger.info("Applied %d score-aware tracks to Spotify", queued)
         return queued
 
     def get_queue_tracks(self) -> list[TrackSummary]:
@@ -273,11 +283,13 @@ class SpotifyController:
         )
         return profile
 
-    def _search_candidate_tracks(self, mood: MoodLabel, profile: TasteProfile) -> list[TrackSummary]:
+    def _search_candidate_tracks(self, ema_score: float, profile: TasteProfile) -> list[TrackSummary]:
         if self.client is None:
             return []
 
-        queries = self._candidate_queries_for_mood(mood, profile)
+        score = clamp_score(ema_score)
+        state_label = fatigue_state_from_score(score)
+        queries = self._candidate_queries_for_score(score, profile)
         candidates: list[TrackSummary] = []
         seen_ids: set[str] = set()
         excluded = set(profile.excluded_track_ids) | set(self._recent_recommendation_ids)
@@ -287,7 +299,7 @@ class SpotifyController:
 
         for index, query in enumerate(queries):
             try:
-                logger.debug("Spotify search query for mood=%s: %s", mood.value, query)
+                logger.debug("Spotify search query for score=%.2f (%s): %s", score, state_label, query)
                 offset = self._query_offset(index)
                 with self._client_lock:
                     response = self.client.search(
@@ -309,12 +321,12 @@ class SpotifyController:
                 seen_ids.add(track.track_id)
                 candidates.append(track)
 
-        logger.info("Collected %d candidate tracks for mood=%s", len(candidates), mood.value)
+        logger.info("Collected %d candidate tracks for score=%.2f (%s)", len(candidates), score, state_label)
         return candidates
 
-    def _candidate_queries_for_mood(self, mood: MoodLabel, profile: TasteProfile) -> list[str]:
+    def _candidate_queries_for_score(self, ema_score: float, profile: TasteProfile) -> list[str]:
         artist_names = profile.seed_artist_names[:6]
-        genres = MOOD_GENRES[mood][:4]
+        genres = self._genres_for_score(ema_score)[:4]
 
         queries: list[str] = []
         for genre in genres:
@@ -329,7 +341,7 @@ class SpotifyController:
 
     def _rank_candidates(
         self,
-        mood: MoodLabel,
+        ema_score: float,
         candidates: list[TrackSummary],
         profile: TasteProfile,
         limit: int,
@@ -337,22 +349,24 @@ class SpotifyController:
         if not candidates:
             return []
 
+        score = clamp_score(ema_score)
+        state_label = fatigue_state_from_score(score)
         feature_map = self._fetch_audio_features_with_retry([track.track_id for track in candidates])
         ranked: list[tuple[float, TrackSummary]] = []
 
         for track in candidates:
-            score = self._score_track(mood, track, feature_map.get(track.track_id), profile)
-            if score is None:
+            ranking_score = self._score_track(score, track, feature_map.get(track.track_id), profile)
+            if ranking_score is None:
                 continue
             features = feature_map.get(track.track_id)
             if features:
                 track.energy = features.get("energy", track.energy)
                 track.tempo = features.get("tempo", track.tempo)
                 track.valence = features.get("valence", track.valence)
-            ranked.append((score, track))
+            ranked.append((ranking_score, track))
 
         ranked.sort(key=lambda item: item[0], reverse=True)
-        logger.info("Ranked %d candidate tracks for mood=%s", len(ranked), mood.value)
+        logger.info("Ranked %d candidate tracks for score=%.2f (%s)", len(ranked), score, state_label)
         return [track for _, track in ranked[:limit]]
 
     def _fetch_audio_features_with_retry(self, track_ids: list[str]) -> dict[str, dict[str, float] | None]:
@@ -432,7 +446,7 @@ class SpotifyController:
 
     def _score_track(
         self,
-        mood: MoodLabel,
+        ema_score: float,
         track: TrackSummary,
         features: dict[str, float] | None,
         profile: TasteProfile,
@@ -441,7 +455,7 @@ class SpotifyController:
             logger.debug("Skipping track %s because audio features were unavailable", track.track_id)
             return None
 
-        target = self._target_audio_profile(mood)
+        target = self._target_audio_profile(ema_score)
         energy_score = 1.0 - abs(features["energy"] - target["energy"])
         valence_score = 1.0 - abs(features["valence"] - target["valence"])
         tempo_delta = abs(features["tempo"] - target["tempo"]) / 80.0
@@ -462,12 +476,21 @@ class SpotifyController:
             + artist_repeat_penalty
         )
 
-    def _target_audio_profile(self, mood: MoodLabel) -> dict[str, float]:
-        if mood in {MoodLabel.TIRED, MoodLabel.BORED}:
-            return {"energy": 0.8, "valence": 0.7, "tempo": 128.0}
-        if mood is MoodLabel.FRUSTRATED:
-            return {"energy": 0.45, "valence": 0.55, "tempo": 95.0}
-        return {"energy": 0.6, "valence": 0.6, "tempo": 112.0}
+    def _genres_for_score(self, ema_score: float) -> list[str]:
+        score = clamp_score(ema_score)
+        if score < DROWSY_SCORE_THRESHOLD:
+            return AWAKE_GENRES
+        if score < TIRED_SCORE_THRESHOLD:
+            return DROWSY_GENRES
+        return TIRED_GENRES
+
+    def _target_audio_profile(self, ema_score: float) -> dict[str, float]:
+        score = clamp_score(ema_score)
+        return {
+            "energy": 0.55 + (0.35 * score),
+            "valence": 0.55 + (0.20 * score),
+            "tempo": 108.0 + (22.0 * score),
+        }
 
     def _track_from_spotify(self, item: dict[str, Any]) -> TrackSummary:
         artists = item.get("artists") or [{"name": "Unknown Artist"}]
@@ -505,34 +528,29 @@ class SpotifyController:
         with self._state_lock:
             self.snapshot = snapshot
 
-    def _fallback_tracks(self, mood: MoodLabel = MoodLabel.FOCUSED, limit: int = 4) -> list[TrackSummary]:
+    def _fallback_tracks(self, ema_score: float = 0.2, limit: int = 4) -> list[TrackSummary]:
+        state_label = fatigue_state_from_score(ema_score)
         defaults = {
-            MoodLabel.FOCUSED: [
-                ("fallback-focus-1", "Deep Focus Loop", "Study Buddy"),
-                ("fallback-focus-2", "Quiet Momentum", "Study Buddy"),
-                ("fallback-focus-3", "Steady Pixels", "Study Buddy"),
-                ("fallback-focus-4", "Flow State", "Study Buddy"),
+            "awake": [
+                ("fallback-awake-1", "Deep Focus Loop", "Study Buddy"),
+                ("fallback-awake-2", "Quiet Momentum", "Study Buddy"),
+                ("fallback-awake-3", "Steady Pixels", "Study Buddy"),
+                ("fallback-awake-4", "Flow State", "Study Buddy"),
             ],
-            MoodLabel.TIRED: [
+            "drowsy": [
+                ("fallback-drowsy-1", "Fresh Tab", "Study Buddy"),
+                ("fallback-drowsy-2", "Level Up", "Study Buddy"),
+                ("fallback-drowsy-3", "Color Burst", "Study Buddy"),
+                ("fallback-drowsy-4", "New Loop", "Study Buddy"),
+            ],
+            "tired": [
                 ("fallback-tired-1", "Wake Up Sprint", "Study Buddy"),
                 ("fallback-tired-2", "Bright Notes", "Study Buddy"),
                 ("fallback-tired-3", "Second Wind", "Study Buddy"),
                 ("fallback-tired-4", "Keep Moving", "Study Buddy"),
             ],
-            MoodLabel.BORED: [
-                ("fallback-bored-1", "Color Burst", "Study Buddy"),
-                ("fallback-bored-2", "Fresh Tab", "Study Buddy"),
-                ("fallback-bored-3", "Level Up", "Study Buddy"),
-                ("fallback-bored-4", "New Loop", "Study Buddy"),
-            ],
-            MoodLabel.FRUSTRATED: [
-                ("fallback-frustrated-1", "Reset Breath", "Study Buddy"),
-                ("fallback-frustrated-2", "Soft Landing", "Study Buddy"),
-                ("fallback-frustrated-3", "Clear Head", "Study Buddy"),
-                ("fallback-frustrated-4", "Gentle Progress", "Study Buddy"),
-            ],
         }
         return [
             TrackSummary(track_id=track_id, name=name, artist=artist, uri=f"spotify:track:{track_id}")
-            for track_id, name, artist in defaults[mood][:limit]
+            for track_id, name, artist in defaults[state_label][:limit]
         ]

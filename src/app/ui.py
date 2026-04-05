@@ -18,22 +18,27 @@ from PySide6.QtWidgets import (
 )
 
 from .config import AppConfig
-from .models import BreakState, MoodLabel, SessionSnapshot, TrackSummary
+from .models import BreakState, SessionSnapshot, TrackSummary, fatigue_state_from_score
 
 
 logger = logging.getLogger(__name__)
 
 
 STATE_MESSAGES = {
-    "focus": [
+    "awake": [
         "Keep up the focus, you're doing great!",
         "Eyes on the prize!",
         "Almost there, stay sharp!",
     ],
-    "tired": [
+    "drowsy": [
         "Take a deep breath...",
         "Maybe a quick stretch would help!",
         "Stay hydrated, don't slump!",
+    ],
+    "tired": [
+        "Time to reset your energy a bit.",
+        "A quick movement break could help here.",
+        "Let's wake things back up.",
     ],
     "break": [
         "Time for a break! Relax a bit.",
@@ -57,14 +62,6 @@ class FocusLevel(StrEnum):
     HAPPY = "happy"
     TIRED = "tired"
     SLEEPY = "sleepy"
-
-
-FOCUS_LEVEL_BY_MOOD = {
-    MoodLabel.FOCUSED: FocusLevel.HAPPY,
-    MoodLabel.TIRED: FocusLevel.TIRED,
-    MoodLabel.BORED: FocusLevel.TIRED,
-    MoodLabel.FRUSTRATED: FocusLevel.SLEEPY,
-}
 
 
 class SpeechBubbleLabel(QLabel):
@@ -114,8 +111,8 @@ class PixelBuddyWidget(QLabel):
     def __init__(self, frame_root: Path, size_px: int, frame_interval_ms: int) -> None:
         super().__init__()
         self._frame_root = frame_root
-        self._mood = MoodLabel.FOCUSED
-        self._focus_level = focus_level_for_mood(self._mood)
+        self._ema_score = 0.2
+        self._focus_level = focus_level_for_score(self._ema_score)
         self._frame_index = 0
         self._frames = self._load_frames(self._focus_level)
         self.setFixedSize(size_px, size_px)
@@ -126,11 +123,12 @@ class PixelBuddyWidget(QLabel):
         self._timer.start(frame_interval_ms)
         self._render()
 
-    def set_mood(self, mood: MoodLabel) -> None:
-        next_focus_level = focus_level_for_mood(mood)
-        if mood == self._mood and next_focus_level == self._focus_level:
+    def set_score(self, ema_score: float) -> None:
+        next_focus_level = focus_level_for_score(ema_score)
+        if next_focus_level == self._focus_level:
+            self._ema_score = ema_score
             return
-        self._mood = mood
+        self._ema_score = ema_score
         self._focus_level = next_focus_level
         self._frame_index = 0
         self._frames = self._load_frames(self._focus_level)
@@ -170,8 +168,13 @@ class PixelBuddyWidget(QLabel):
         return [placeholder]
 
 
-def focus_level_for_mood(mood: MoodLabel) -> FocusLevel:
-    return FOCUS_LEVEL_BY_MOOD.get(mood, FocusLevel.TIRED)
+def focus_level_for_score(ema_score: float) -> FocusLevel:
+    state_label = fatigue_state_from_score(ema_score)
+    if state_label == "awake":
+        return FocusLevel.HAPPY
+    if state_label == "drowsy":
+        return FocusLevel.TIRED
+    return FocusLevel.SLEEPY
 
 
 class BuddyWindow(QWidget):
@@ -251,7 +254,7 @@ class BuddyWindow(QWidget):
 
         self._song_label = QLabel("Playing: Waiting for playback")
         self._queue_label = QLabel("Up next: building queue...")
-        self._mood_label = QLabel("Mood: focused")
+        self._score_label = QLabel("Tiredness: 0.20 (awake)")
         self._status_label = QLabel("Camera: connecting")
         self._break_label = QLabel("Break: not active")
         self._last_update_label = QLabel("Queue refresh: pending")
@@ -267,7 +270,7 @@ class BuddyWindow(QWidget):
         panel_layout.addWidget(title)
         panel_layout.addWidget(self._song_label)
         panel_layout.addWidget(self._queue_label)
-        panel_layout.addWidget(self._mood_label)
+        panel_layout.addWidget(self._score_label)
         panel_layout.addWidget(self._status_label)
         panel_layout.addWidget(self._break_label)
         panel_layout.addWidget(self._last_update_label)
@@ -296,13 +299,11 @@ class BuddyWindow(QWidget):
         if snapshot.break_state.active:
             choices = STATE_MESSAGES["break"]
         else:
-            focus_level = focus_level_for_mood(snapshot.mood)
-            if focus_level == FocusLevel.HAPPY:
-                choices = STATE_MESSAGES["focus"]
-            elif focus_level == FocusLevel.TIRED:
-                choices = STATE_MESSAGES["tired"]
-            else:
+            if not snapshot.face_detected:
                 choices = STATE_MESSAGES["default"]
+            else:
+                state_label = fatigue_state_from_score(snapshot.ema_score)
+                choices = STATE_MESSAGES.get(state_label, STATE_MESSAGES["default"])
 
         choices = [message for message in choices if message != self._last_message]
         message = random.choice(choices) if choices else random.choice(STATE_MESSAGES["default"])
@@ -353,10 +354,17 @@ class BuddyWindow(QWidget):
 
     def update_snapshot(self, snapshot: SessionSnapshot, webcam_available: bool) -> None:
         self._latest_snapshot = snapshot
-        self._buddy.set_mood(snapshot.mood)
-        self._mood_label.setText(f"Mood: {snapshot.mood.value} ({snapshot.confidence:.0%} confidence)")
+        self._buddy.set_score(snapshot.ema_score)
+        self._score_label.setText(
+            f"Tiredness: {snapshot.ema_score:.2f} ({snapshot.state_label}) | 5s avg: {snapshot.rolling_score:.2f}"
+        )
         self._status_label.setText(
-            f"Camera: {'live' if webcam_available else 'offline, using fallback'} | Fatigue: {snapshot.fatigue_seconds:.0f}s"
+            "Camera: "
+            + (
+                f"{'live' if webcam_available else 'offline, using fallback'}"
+                f" | {'face detected' if snapshot.face_detected else 'no face detected'}"
+                f" | Fatigue: {snapshot.fatigue_seconds:.0f}s"
+            )
         )
         self._song_label.setText(
             "Playing: "
