@@ -294,8 +294,8 @@ class BuddyWindow(QWidget):
         title_row.addStretch()
         title_row.addWidget(self._quit_button)
 
-        self._song_label = QLabel("Playing: Waiting for playback")
-        self._queue_label = QLabel("Up next: building queue...")
+        self._song_label = QLabel("Spotify: Waiting...")
+        # self._queue_label = QLabel("Up next: building queue...")
         self._score_label = QLabel("Tiredness: 0.20 (awake)")
         self._status_label = QLabel("Camera: connecting")
         self._break_label = QLabel("Break: not active")
@@ -311,7 +311,7 @@ class BuddyWindow(QWidget):
         panel_layout.setSpacing(8)
         panel_layout.addLayout(title_row)
         panel_layout.addWidget(self._song_label)
-        panel_layout.addWidget(self._queue_label)
+        # panel_layout.addWidget(self._queue_label)
         panel_layout.addWidget(self._score_label)
         panel_layout.addWidget(self._status_label)
         panel_layout.addWidget(self._break_label)
@@ -423,16 +423,16 @@ class BuddyWindow(QWidget):
             status_text += f" | Fatigue: {snapshot.fatigue_seconds:.0f}s"
         self._status_label.setText(status_text)
         self._song_label.setText(
-            "Playing: "
+            "Spotify: "
             + (
-                f"{snapshot.current_track.name} - {snapshot.current_track.artist}"
+                "Active"
                 if snapshot.current_track
-                else ("Spotify disabled (demo mode)" if not snapshot.spotify_enabled else "No active Spotify playback")
+                else ("Disabled" if not snapshot.spotify_enabled else "Inactive, waiting for playback")
             )
         )
-        self._queue_label.setText(
-            f"Up next: {self._format_upcoming_tracks(snapshot.current_track, snapshot.upcoming_tracks)}"
-        )
+        # self._queue_label.setText(
+        #     f"Up next: {self._format_upcoming_tracks(snapshot.current_track, snapshot.upcoming_tracks)}"
+        # )
         self._update_break(snapshot.break_state)
         self._last_update_label.setText(
             "Last queue refresh: "
