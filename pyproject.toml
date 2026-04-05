@@ -23,6 +23,5 @@ dependencies = [
     "opencv-python-headless>=4.13.0.92",
     "opencv-contrib-python>=4.13.0.92",
     "mediapipe>=0.10.33",
-    "dlib>=20.0.1",
     "cmake>=4.3.1",
 ]
