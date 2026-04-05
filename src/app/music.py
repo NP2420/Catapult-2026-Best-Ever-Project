@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import os
@@ -35,13 +36,33 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def parse_cli_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(
+        description="Run the AI Study Buddy desktop app.",
+    )
+    parser.add_argument(
+        "--spotify",
+        dest="spotify_enabled",
+        action="store_true",
+        default=True,
+        help="Enable live Spotify integration (default).",
+    )
+    parser.add_argument(
+        "--no-spotify",
+        dest="spotify_enabled",
+        action="store_false",
+        help="Disable Spotify OAuth/API calls and run in offline demo/debug mode.",
+    )
+    return parser.parse_known_args(argv)
+
+
 class StudyBuddyController(QObject):
-    def __init__(self, window: BuddyWindow, config: AppConfig) -> None:
+    def __init__(self, window: BuddyWindow, config: AppConfig, spotify_enabled: bool = True) -> None:
         super().__init__()
         self.config = config
         self.window = window
         self.mood_monitor = WebcamInferenceMonitor.from_config(config)
-        self.spotify = SpotifyController.from_config(config)
+        self.spotify = SpotifyController.from_config(config, spotify_enabled=spotify_enabled)
         self.productivity = ProductivityEngine(
             short_term_threshold_seconds=config.short_term_threshold_seconds,
             long_term_threshold_seconds=config.long_term_threshold_seconds,
@@ -113,6 +134,7 @@ class StudyBuddyController(QObject):
             current_track=spotify_snapshot.current_track,
             upcoming_tracks=spotify_snapshot.queue,
             last_queue_refresh=spotify_snapshot.last_refresh or self.last_queue_refresh,
+            spotify_enabled=self.spotify.spotify_enabled,
         )
         self.window.update_snapshot(snapshot, webcam_available=sample.available)
 
@@ -174,16 +196,19 @@ class StudyBuddyController(QObject):
 
 
 def main() -> int:
+    args, qt_args = parse_cli_args(sys.argv[1:])
+
     load_dotenv()
     config = load_app_config()
     configure_logging(config)
     logger.info("Loaded app config: %s", config)
+    logger.info("Spotify integration enabled: %s", args.spotify_enabled)
 
-    app = QApplication(sys.argv)
+    app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName("AI Study Buddy")
 
     window = BuddyWindow(config)
-    controller = StudyBuddyController(window, config)
+    controller = StudyBuddyController(window, config, spotify_enabled=args.spotify_enabled)
     app.aboutToQuit.connect(controller.stop)
 
     window.show()

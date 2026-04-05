@@ -397,7 +397,7 @@ class BuddyWindow(QWidget):
             + (
                 f"{snapshot.current_track.name} - {snapshot.current_track.artist}"
                 if snapshot.current_track
-                else "No active Spotify playback"
+                else ("Spotify disabled (demo mode)" if not snapshot.spotify_enabled else "No active Spotify playback")
             )
         )
         self._queue_label.setText(

@@ -72,8 +72,9 @@ class TasteProfile:
 
 
 class SpotifyController:
-    def __init__(self, recommendation_limit: int = 4) -> None:
+    def __init__(self, recommendation_limit: int = 4, spotify_enabled: bool = True) -> None:
         self.recommendation_limit = recommendation_limit
+        self.spotify_enabled = spotify_enabled
         self.client = self._build_client()
         self.snapshot = SpotifySnapshot(current_track=None, queue=self._fallback_tracks())
         self._profile_logged = False
@@ -90,8 +91,11 @@ class SpotifyController:
         self._reccobeats_call_count = 0
 
     @classmethod
-    def from_config(cls, config: AppConfig) -> "SpotifyController":
-        return cls(recommendation_limit=config.spotify_recommendation_limit)
+    def from_config(cls, config: AppConfig, spotify_enabled: bool = True) -> "SpotifyController":
+        return cls(
+            recommendation_limit=config.spotify_recommendation_limit,
+            spotify_enabled=spotify_enabled,
+        )
 
     def refresh_for_score(self, ema_score: float, limit: int = 4) -> SpotifySnapshot:
         self._spotipy_call_count = 0
@@ -242,6 +246,10 @@ class SpotifyController:
             )
 
     def _build_client(self) -> spotipy.Spotify | None:
+        if not self.spotify_enabled:
+            logger.info("Spotify integration disabled via command-line option; using fallback music mode")
+            return None
+
         client_id = os.getenv("SPOTIFY_CLIENT_ID") or os.getenv("CLIENT_ID")
         client_secret = os.getenv("SPOTIFY_CLIENT_SECRET") or os.getenv("CLIENT_SECRET")
         redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")

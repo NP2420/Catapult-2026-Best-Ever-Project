@@ -68,6 +68,7 @@ class SessionSnapshot:
     current_track: TrackSummary | None
     upcoming_tracks: list[TrackSummary]
     last_queue_refresh: datetime | None
+    spotify_enabled: bool = True
 
     @property
     def state_label(self) -> str:

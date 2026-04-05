@@ -22,6 +22,12 @@ source .venv/scripts/activate # bash command, may be different in powershell or 
 python src/app/music.py
 ```
 
+Offline/demo mode without Spotify OAuth or API traffic:
+
+```bash
+python src/app/music.py --no-spotify
+```
+
 ## Environment
 
 Set Spotify credentials if you want live playback integration (requires premium unfortunately):
@@ -57,3 +63,4 @@ STUDY_BUDDY_WINDOW_MARGIN_PX=24
 ```
 
 Without those values, the app still runs and falls back to local demo tracks.
+You can also force that behavior with `--no-spotify`, which is useful for users without Spotify and for debugging the model/break flow without hitting the Spotify API.
