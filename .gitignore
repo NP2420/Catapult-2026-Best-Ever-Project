@@ -222,3 +222,6 @@ __marimo__/
 src/machine-learning/DAiSEE/
 src/machine-learning/DAiSEE_crops/
 src/machine-learning/expression-models/
+
+src/ml-focus/tired-data/
+src/ml-focus/tired-yolo/

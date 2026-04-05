@@ -95,25 +95,61 @@ _HUD_COLORS = {
 
 def draw_hud(frame: np.ndarray, state: EngagementState) -> np.ndarray:
     """
-    Draw a semi-transparent emotion bar chart in the top-left corner.
+    Draw a semi-transparent emotion bar chart in the top-left corner,
+    plus a binary 'Focused vs Unfocused' panel.
     Works in-place on the frame; returns the frame for chaining.
     """
     h, w = frame.shape[:2]
     overlay = frame.copy()
 
-    # Background panel
-    panel_w, panel_h = 220, 120
+    # Background panel for everything
+    panel_w, panel_h = 220, 140
     cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h),
                   (30, 30, 30), -1)
     cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
-    # Bars
+    # ---------------------------
+    # Binary Focus/Unfocused panel
+    # ---------------------------
     bar_x  = 20
-    bar_y0 = 20
+    bar_y  = 15
     bar_h  = 18
-    gap    = 22
     max_w  = 180
 
+    focused = state.engagement
+    unfocused = state.boredom + state.confusion + state.frustration
+    total = focused + unfocused
+    # avoid divide-by-zero
+    if total > 0:
+        focused /= total
+        unfocused /= total
+    else:
+        focused, unfocused = 0.0, 0.0
+
+    # Focus bar
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + max_w, bar_y + bar_h),
+                  (70, 70, 70), -1)
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(focused * max_w), bar_y + bar_h),
+                  (50, 200, 50), -1)
+    cv2.putText(frame, f"Focused  {focused:.2f}",
+                (bar_x + 4, bar_y + bar_h - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
+
+    # Unfocused bar
+    bar_y += bar_h + 6
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + max_w, bar_y + bar_h),
+                  (70, 70, 70), -1)
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(unfocused * max_w), bar_y + bar_h),
+                  (200, 50, 50), -1)
+    cv2.putText(frame, f"Unfocused {unfocused:.2f}",
+                (bar_x + 4, bar_y + bar_h - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
+
+    # ---------------------------
+    # Regular emotion bars
+    # ---------------------------
+    bar_y0 = bar_y + bar_h + 12
+    gap    = 22
     for i, name in enumerate(LABEL_NAMES):
         score = getattr(state, name)
         y     = bar_y0 + i * gap
@@ -224,8 +260,8 @@ class InferenceEngine:
 
     def _capture_loop(self):
         """
-        Thread 1: reads webcam frames as fast as possible, detects faces,
-        and appends crops to the rolling buffer.
+        Thread 1: reads webcam frames, detects faces, resizes to model input,
+        and appends normalized crops to the rolling buffer.
         """
         cap = cv2.VideoCapture(self.cam_index)
         if not cap.isOpened():
@@ -239,8 +275,6 @@ class InferenceEngine:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
         frame_count = 0
-        # We extract a face crop every 6th frame at 30fps ≈ 5fps,
-        # matching the preprocessing target_fps used at training time.
         EXTRACT_INTERVAL = max(1, round(30 / CFG.preproc.target_fps))
 
         while not self._stop_event.is_set():
@@ -253,12 +287,18 @@ class InferenceEngine:
                 self._latest_frame = bgr.copy()
 
             if frame_count % EXTRACT_INTERVAL == 0:
-                rgb  = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                # boxes: (N,4) or None, probs: (N,) or None
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 crop, prob = self.detector(rgb, return_prob=True)
 
                 if crop is not None and (prob is None or prob > CFG.inference.min_confidence):
+                    # Convert tensor → numpy
                     crop_hwc = crop.permute(1, 2, 0).numpy().astype(np.uint8)
+
+                    # Resize to ONNX model input
+                    crop_hwc = cv2.resize(crop_hwc, 
+                                        (CFG.preproc.crop_size, CFG.preproc.crop_size))
+
+                    # Normalize and append
                     self.frame_buffer.append(_normalise(crop_hwc))
                     self._last_confidence = float(prob) if prob is not None else 1.0
 
