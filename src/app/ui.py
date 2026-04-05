@@ -62,6 +62,7 @@ class FocusLevel(StrEnum):
     HAPPY = "happy"
     TIRED = "tired"
     SLEEPY = "sleepy"
+    BREAK = "break"
 
 
 class SpeechBubbleLabel(QLabel):
@@ -123,8 +124,8 @@ class PixelBuddyWidget(QLabel):
         self._timer.start(frame_interval_ms)
         self._render()
 
-    def set_score(self, ema_score: float) -> None:
-        next_focus_level = focus_level_for_score(ema_score)
+    def set_state(self, ema_score: float, break_state: BreakState | None = None) -> None:
+        next_focus_level = focus_level_for_snapshot(ema_score, break_state)
         if next_focus_level == self._focus_level:
             self._ema_score = ema_score
             return
@@ -177,6 +178,12 @@ def focus_level_for_score(ema_score: float) -> FocusLevel:
     return FocusLevel.SLEEPY
 
 
+def focus_level_for_snapshot(ema_score: float, break_state: BreakState | None = None) -> FocusLevel:
+    if break_state and break_state.active and break_state.seconds_remaining > 0:
+        return FocusLevel.BREAK
+    return focus_level_for_score(ema_score)
+
+
 class BuddyWindow(QWidget):
     resume_requested = Signal()
 
@@ -226,11 +233,12 @@ class BuddyWindow(QWidget):
         self._panel.setStyleSheet(
             """
             QFrame {
-                background: rgba(17, 24, 39, 50);
+                background: rgba(17, 24, 39, 230);
                 border-radius: 16px;
                 border: none;
             }
             QLabel {
+                background: transparent;
                 color: #F8FAFC;
             }
             QPushButton {
@@ -380,7 +388,7 @@ class BuddyWindow(QWidget):
 
     def update_snapshot(self, snapshot: SessionSnapshot, webcam_available: bool) -> None:
         self._latest_snapshot = snapshot
-        self._buddy.set_score(snapshot.ema_score)
+        self._buddy.set_state(snapshot.ema_score, snapshot.break_state)
         self._score_label.setText(
             f"Tiredness: {snapshot.ema_score:.2f} ({snapshot.state_label}) | 5s avg: {snapshot.rolling_score:.2f}"
         )
