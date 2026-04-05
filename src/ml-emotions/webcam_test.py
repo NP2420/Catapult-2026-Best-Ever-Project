@@ -7,7 +7,7 @@ Real-time emotion detection from your webcam.
     After training, copy best.pt to your machine:
         scp pham191@gautschi.rcac.purdue.edu:\
             /scratch/gautschi/pham191/Catapult-2026-Best-Ever-Project/\
-            src/ml-emotions-alt/outputs/emotion_yolov8x/weights/best.pt \
+            src/ml-emotions/outputs/emotion_yolov8x/weights/best.pt \
             ./best.pt
 
 Requirements (local):
@@ -279,7 +279,7 @@ def main():
         f"Copy it from the cluster:\n"
         f"  scp pham191@gautschi.rcac.purdue.edu:"
         f"/scratch/gautschi/pham191/Catapult-2026-Best-Ever-Project/"
-        f"src/ml-emotions-alt/outputs/emotion_yolov8x/weights/best.pt ."
+        f"src/ml-emotions/best.pt ."
     )
 
     print(f"Loading model: {model_path}")
