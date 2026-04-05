@@ -81,7 +81,7 @@ def load_app_config() -> AppConfig:
         mood_poll_interval_seconds=_env_float("STUDY_BUDDY_MOOD_POLL_SECONDS", 1.0),
         mood_smoothing_window=_env_int("STUDY_BUDDY_MOOD_SMOOTHING_WINDOW", 10),
         controller_tick_interval_ms=_env_int("STUDY_BUDDY_TICK_MS", 1000),
-        queue_refresh_seconds=_env_int("STUDY_BUDDY_QUEUE_REFRESH_SECONDS", 120),
+        queue_refresh_seconds=_env_int("STUDY_BUDDY_QUEUE_REFRESH_SECONDS", 45),
         minimum_queue_refresh_seconds=_env_int("STUDY_BUDDY_MIN_QUEUE_REFRESH_SECONDS", 15),
         spotify_recommendation_limit=_env_int("STUDY_BUDDY_SPOTIFY_LIMIT", 1),
         short_term_threshold_seconds=_env_int("STUDY_BUDDY_SHORT_TERM_THRESHOLD", 15),
