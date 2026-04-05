@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -67,124 +68,130 @@ class SpotifyController:
         self.snapshot = SpotifySnapshot(current_track=None, queue=self._fallback_tracks())
         self._profile_logged = False
         self._feature_cache: dict[str, dict[str, float] | None] = {}
+        self._lock = threading.RLock()
 
     @classmethod
     def from_config(cls, config: AppConfig) -> "SpotifyController":
         return cls(recommendation_limit=config.spotify_recommendation_limit)
 
     def refresh_for_mood(self, mood: MoodLabel, limit: int = 4) -> SpotifySnapshot:
-        limit = limit or self.recommendation_limit
-        if self.client is None:
-            logger.info("Spotify client unavailable, using fallback queue for mood=%s", mood.value)
-            self.snapshot = SpotifySnapshot(
-                current_track=self.snapshot.current_track,
-                queue=self._fallback_tracks(mood, limit),
-                last_refresh=datetime.now(),
-            )
-            return self.snapshot
-
-        try:
-            profile = self._build_taste_profile()
-            if not self._profile_logged:
-                logger.info(
-                    "Initialized taste profile with %d top artists from the past month and %d recent tracks",
-                    len(profile.top_artist_names),
-                    len(profile.recent_track_ids),
+        with self._lock:
+            limit = limit or self.recommendation_limit
+            if self.client is None:
+                logger.info("Spotify client unavailable, using fallback queue for mood=%s", mood.value)
+                self.snapshot = SpotifySnapshot(
+                    current_track=self.snapshot.current_track,
+                    queue=self._fallback_tracks(mood, limit),
+                    last_refresh=datetime.now(),
                 )
-                self._profile_logged = True
+                return self.snapshot
 
-            candidates = self._search_candidate_tracks(mood, profile)
-            ranked_queue = self._rank_candidates(mood, candidates, profile, limit)
-            if not ranked_queue:
-                logger.warning("Search/rerank produced no candidates for mood=%s", mood.value)
-                ranked_queue = self._fallback_tracks(mood, limit)
+            try:
+                profile = self._build_taste_profile()
+                if not self._profile_logged:
+                    logger.info(
+                        "Initialized taste profile with %d top artists from the past month and %d recent tracks",
+                        len(profile.top_artist_names),
+                        len(profile.recent_track_ids),
+                    )
+                    self._profile_logged = True
 
-            self.snapshot = SpotifySnapshot(
-                current_track=self.current_playback(),
-                queue=ranked_queue,
-                last_refresh=datetime.now(),
-            )
-            logger.info(
-                "Built mood queue for mood=%s with %d tracks from %d candidates",
-                mood.value,
-                len(self.snapshot.queue),
-                len(candidates),
-            )
-            return self.snapshot
-        except Exception:
-            logger.exception("Spotify search/rerank refresh failed for mood=%s", mood.value)
-            self.snapshot = SpotifySnapshot(
-                current_track=self.snapshot.current_track,
-                queue=self._fallback_tracks(mood, limit),
-                last_refresh=datetime.now(),
-            )
-            return self.snapshot
+                candidates = self._search_candidate_tracks(mood, profile)
+                ranked_queue = self._rank_candidates(mood, candidates, profile, limit)
+                if not ranked_queue:
+                    logger.warning("Search/rerank produced no candidates for mood=%s", mood.value)
+                    ranked_queue = self._fallback_tracks(mood, limit)
+
+                self.snapshot = SpotifySnapshot(
+                    current_track=self.current_playback(),
+                    queue=ranked_queue,
+                    last_refresh=datetime.now(),
+                )
+                logger.info(
+                    "Built mood queue for mood=%s with %d tracks from %d candidates",
+                    mood.value,
+                    len(self.snapshot.queue),
+                    len(candidates),
+                )
+                return self.snapshot
+            except Exception:
+                logger.exception("Spotify search/rerank refresh failed for mood=%s", mood.value)
+                self.snapshot = SpotifySnapshot(
+                    current_track=self.snapshot.current_track,
+                    queue=self._fallback_tracks(mood, limit),
+                    last_refresh=datetime.now(),
+                )
+                return self.snapshot
 
     def current_playback(self) -> TrackSummary | None:
-        if self.client is None:
-            return None
-
-        try:
-            playback = self.client.current_playback()
-            item = (playback or {}).get("item")
-            if not item:
-                logger.debug("No active Spotify playback found")
+        with self._lock:
+            if self.client is None:
                 return None
-            return self._track_from_spotify(item)
-        except Exception:
-            logger.exception("Failed to fetch current Spotify playback")
-            return None
+
+            try:
+                playback = self.client.current_playback()
+                item = (playback or {}).get("item")
+                if not item:
+                    logger.debug("No active Spotify playback found")
+                    return None
+                return self._track_from_spotify(item)
+            except Exception:
+                logger.exception("Failed to fetch current Spotify playback")
+                return None
 
     def queue_top_track(self) -> None:
-        if self.client is None or not self.snapshot.queue:
-            return
+        with self._lock:
+            if self.client is None or not self.snapshot.queue:
+                return
 
-        try:
-            self.client.add_to_queue(self.snapshot.queue[0].uri)
-            self.client.next_track()
-            logger.info("Queued and skipped to recommended track: %s", self.snapshot.queue[0].name)
-        except Exception:
-            logger.exception("Failed to queue or skip to the recommended Spotify track")
+            try:
+                self.client.add_to_queue(self.snapshot.queue[0].uri)
+                self.client.next_track()
+                logger.info("Queued and skipped to recommended track: %s", self.snapshot.queue[0].name)
+            except Exception:
+                logger.exception("Failed to queue or skip to the recommended Spotify track")
 
     def apply_queue_to_spotify(self, max_tracks: int | None = None) -> int:
-        if self.client is None or not self.snapshot.queue:
-            return 0
+        with self._lock:
+            if self.client is None or not self.snapshot.queue:
+                return 0
 
-        desired_tracks = self.snapshot.queue[: max_tracks or len(self.snapshot.queue)]
-        existing_ids = {track.track_id for track in self.get_queue_tracks()}
-        current_track = self.current_playback()
-        if current_track is not None:
-            existing_ids.add(current_track.track_id)
+            desired_tracks = self.snapshot.queue[: max_tracks or len(self.snapshot.queue)]
+            existing_ids = {track.track_id for track in self.get_queue_tracks()}
+            current_track = self.current_playback()
+            if current_track is not None:
+                existing_ids.add(current_track.track_id)
 
-        queued = 0
-        for track in desired_tracks:
-            if track.track_id in existing_ids:
-                logger.debug("Skipping already-present Spotify queue track: %s", track.name)
-                continue
-            try:
-                self.client.add_to_queue(track.uri)
-                existing_ids.add(track.track_id)
-                queued += 1
-                logger.info("Added mood-queue track to Spotify queue: %s", track.name)
-            except Exception:
-                logger.exception("Failed to add recommended track to Spotify queue: %s", track.name)
+            queued = 0
+            for track in desired_tracks:
+                if track.track_id in existing_ids:
+                    logger.debug("Skipping already-present Spotify queue track: %s", track.name)
+                    continue
+                try:
+                    self.client.add_to_queue(track.uri)
+                    existing_ids.add(track.track_id)
+                    queued += 1
+                    logger.info("Added mood-queue track to Spotify queue: %s", track.name)
+                except Exception:
+                    logger.exception("Failed to add recommended track to Spotify queue: %s", track.name)
 
-        logger.info("Applied %d tracks from the mood queue to Spotify", queued)
-        return queued
+            logger.info("Applied %d tracks from the mood queue to Spotify", queued)
+            return queued
 
     def get_queue_tracks(self) -> list[TrackSummary]:
-        if self.client is None:
-            return []
+        with self._lock:
+            if self.client is None:
+                return []
 
-        try:
-            response = self.client.queue()
-        except Exception:
-            logger.exception("Failed to fetch current Spotify queue")
-            return []
+            try:
+                response = self.client.queue()
+            except Exception:
+                logger.exception("Failed to fetch current Spotify queue")
+                return []
 
-        tracks = response.get("queue", [])
-        logger.debug("Fetched %d tracks from the current Spotify queue", len(tracks))
-        return [self._track_from_spotify(track) for track in tracks]
+            tracks = response.get("queue", [])
+            logger.debug("Fetched %d tracks from the current Spotify queue", len(tracks))
+            return [self._track_from_spotify(track) for track in tracks]
 
     def _build_client(self) -> spotipy.Spotify | None:
         client_id = os.getenv("SPOTIFY_CLIENT_ID") or os.getenv("CLIENT_ID")

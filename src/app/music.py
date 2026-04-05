@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -47,6 +48,8 @@ class StudyBuddyController(QObject):
         self.last_tick = datetime.now()
         self.last_queue_refresh: datetime | None = None
         self.queue_refresh_interval = timedelta(seconds=config.queue_refresh_seconds)
+        self._refresh_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spotify-refresh")
+        self._pending_refresh: Future[tuple[datetime | None, int, bool]] | None = None
 
         self.window.resume_requested.connect(self.productivity.resume)
 
@@ -58,22 +61,17 @@ class StudyBuddyController(QObject):
         logger.info("Starting Study Buddy controller")
         self.mood_monitor.start()
         initial_mood = self.mood_monitor.latest_sample().prediction.mood
-        snapshot = self.spotify.refresh_for_mood(
-            initial_mood,
-            limit=self.config.spotify_recommendation_limit,
-        )
-        applied_count = self.spotify.apply_queue_to_spotify(
-            max_tracks=self.config.spotify_recommendation_limit,
-        )
-        logger.info("Applied %d startup mood-queue tracks to Spotify", applied_count)
-        self.last_queue_refresh = snapshot.last_refresh
+        self._schedule_refresh(initial_mood, should_switch_song=False, reason="startup")
         self.tick()
 
     def stop(self) -> None:
         logger.info("Stopping Study Buddy controller")
         self.mood_monitor.stop()
+        self._refresh_executor.shutdown(wait=False, cancel_futures=True)
 
     def tick(self) -> None:
+        self._collect_completed_refresh()
+
         now = datetime.now()
         elapsed = max(1.0, (now - self.last_tick).total_seconds())
         self.last_tick = now
@@ -88,22 +86,11 @@ class StudyBuddyController(QObject):
                 sample.prediction.mood.value,
                 decision.should_switch_song,
             )
-            spotify_snapshot = self.spotify.refresh_for_mood(
+            self._schedule_refresh(
                 sample.prediction.mood,
-                limit=self.config.spotify_recommendation_limit,
+                should_switch_song=decision.should_switch_song,
+                reason="fatigue trigger" if decision.should_switch_song else "scheduled refresh",
             )
-            applied_count = self.spotify.apply_queue_to_spotify(
-                max_tracks=self.config.spotify_recommendation_limit,
-            )
-            logger.info(
-                "Applied %d refreshed mood-queue tracks to Spotify for mood=%s",
-                applied_count,
-                sample.prediction.mood.value,
-            )
-            self.last_queue_refresh = spotify_snapshot.last_refresh
-            if decision.should_switch_song:
-                logger.info("Short-term fatigue reached; switching song")
-                self.spotify.queue_top_track()
 
         current_track = self.spotify.current_playback() or self.spotify.snapshot.current_track
         snapshot = SessionSnapshot(
@@ -121,6 +108,47 @@ class StudyBuddyController(QObject):
         if self.last_queue_refresh is None:
             return True
         return (now - self.last_queue_refresh) >= self.queue_refresh_interval
+
+    def _schedule_refresh(self, mood, should_switch_song: bool, reason: str) -> None:
+        if self._pending_refresh and not self._pending_refresh.done():
+            logger.debug("Skipping Spotify refresh schedule because one is already running")
+            return
+
+        logger.info("Scheduling Spotify refresh for mood=%s (%s)", mood.value, reason)
+        self._pending_refresh = self._refresh_executor.submit(
+            self._run_refresh_job,
+            mood,
+            should_switch_song,
+        )
+
+    def _run_refresh_job(self, mood, should_switch_song: bool) -> tuple[datetime | None, int, bool]:
+        snapshot = self.spotify.refresh_for_mood(
+            mood,
+            limit=self.config.spotify_recommendation_limit,
+        )
+        applied_count = self.spotify.apply_queue_to_spotify(
+            max_tracks=self.config.spotify_recommendation_limit,
+        )
+        if should_switch_song:
+            self.spotify.queue_top_track()
+        return snapshot.last_refresh, applied_count, should_switch_song
+
+    def _collect_completed_refresh(self) -> None:
+        if self._pending_refresh is None or not self._pending_refresh.done():
+            return
+
+        try:
+            last_refresh, applied_count, should_switch_song = self._pending_refresh.result()
+            self.last_queue_refresh = last_refresh
+            logger.info(
+                "Completed Spotify refresh: applied=%d, switched_song=%s",
+                applied_count,
+                should_switch_song,
+            )
+        except Exception:
+            logger.exception("Spotify refresh worker failed")
+        finally:
+            self._pending_refresh = None
 
 
 def main() -> int:
