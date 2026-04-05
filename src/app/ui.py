@@ -60,6 +60,7 @@ STATE_MESSAGES = {
 
 BUBBLE_VISIBLE_MS = 5_000
 BUBBLE_INTERVAL_MS = 1 * 60 * 1_000
+DRAG_BUBBLE_VISIBLE_MS = 500
 VISIBLE_QUEUE_ITEMS = 1
 
 
@@ -220,6 +221,7 @@ class BuddyWindow(QWidget):
             frame_interval_ms=config.buddy_frame_interval_ms,
         )
         self._buddy.clicked.connect(self.toggle_expanded)
+        self._buddy.installEventFilter(self)
 
         buddy_column = QVBoxLayout()
         buddy_column.setContentsMargins(0, 0, 0, 0)
@@ -356,11 +358,17 @@ class BuddyWindow(QWidget):
         if self._latest_snapshot is None:
             return
         message = self._choose_message(self._latest_snapshot)
+        self._show_bubble_message(message, BUBBLE_VISIBLE_MS)
+
+    def _show_bubble_message(self, message: str, duration_ms: int) -> None:
         self._bubble.setText(message)
         self._bubble.setVisible(True)
         self._refresh_layout()
-        self._hide_timer.start(BUBBLE_VISIBLE_MS)
+        self._hide_timer.start(duration_ms)
         logger.debug("Buddy message shown: %s", message)
+
+    def _show_drag_message(self) -> None:
+        self._show_bubble_message("Haha that tickles!", DRAG_BUBBLE_VISIBLE_MS)
 
     def _hide_bubble(self) -> None:
         if not self._bubble.isVisible():
@@ -449,21 +457,50 @@ class BuddyWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            self._did_drag = False
+            self._begin_drag(event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._drag_origin and event.buttons() & Qt.MouseButton.LeftButton:
-            new_pos = event.globalPosition().toPoint() - self._drag_origin
-            if not self._did_drag:
-                delta = event.globalPosition().toPoint() - (self.frameGeometry().topLeft() + self._drag_origin)
-                if delta.manhattanLength() > 4:
-                    self._did_drag = True
-            self.move(new_pos)
+            self._drag_to(event.globalPosition().toPoint())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._finish_drag()
+        super().mouseReleaseEvent(event)
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.WindowDeactivate:
+            self.activateWindow()
+        return super().event(event)
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if watched is self._buddy and isinstance(event, QMouseEvent):
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._begin_drag(event.globalPosition().toPoint())
+            elif event.type() == QEvent.Type.MouseMove and event.buttons() & Qt.MouseButton.LeftButton:
+                self._drag_to(event.globalPosition().toPoint())
+            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                self._finish_drag()
+        return super().eventFilter(watched, event)
+
+    def _begin_drag(self, global_pos: QPoint) -> None:
+        self._drag_origin = global_pos - self.frameGeometry().topLeft()
+        self._did_drag = False
+
+    def _drag_to(self, global_pos: QPoint) -> None:
+        if self._drag_origin is None:
+            return
+        new_pos = global_pos - self._drag_origin
+        if not self._did_drag:
+            delta = global_pos - (self.frameGeometry().topLeft() + self._drag_origin)
+            if delta.manhattanLength() > 4:
+                self._did_drag = True
+                self._show_drag_message()
+        self.move(new_pos)
+
+    def _finish_drag(self) -> None:
         if self._drag_origin is not None and self._did_drag:
             screen = self.screen() or QApplication.primaryScreen()
             geo = self.frameGeometry()
@@ -475,12 +512,6 @@ class BuddyWindow(QWidget):
                 br_y = max(avail.top() + self.height(), min(br_y, avail.bottom()))
             self._bottom_right = QPoint(br_x, br_y)
         self._drag_origin = None
-        super().mouseReleaseEvent(event)
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.WindowDeactivate:
-            self.activateWindow()
-        return super().event(event)
 
     def _refresh_size(self) -> None:
         self.setMinimumSize(0, 0)
