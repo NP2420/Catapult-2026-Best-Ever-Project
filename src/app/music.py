@@ -92,15 +92,15 @@ class StudyBuddyController(QObject):
                 reason="fatigue trigger" if decision.should_switch_song else "scheduled refresh",
             )
 
-        current_track = self.spotify.current_playback() or self.spotify.snapshot.current_track
+        spotify_snapshot = self.spotify.get_snapshot()
         snapshot = SessionSnapshot(
             mood=sample.prediction.mood,
             confidence=sample.prediction.confidence,
             fatigue_seconds=self.productivity.fatigue_seconds,
             break_state=self.productivity.break_state,
-            current_track=current_track,
-            upcoming_tracks=self.spotify.snapshot.queue,
-            last_queue_refresh=self.last_queue_refresh,
+            current_track=spotify_snapshot.current_track,
+            upcoming_tracks=spotify_snapshot.queue,
+            last_queue_refresh=spotify_snapshot.last_refresh or self.last_queue_refresh,
         )
         self.window.update_snapshot(snapshot, webcam_available=sample.available)
 

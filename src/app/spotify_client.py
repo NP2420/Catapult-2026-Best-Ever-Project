@@ -73,7 +73,8 @@ class SpotifyController:
         self.snapshot = SpotifySnapshot(current_track=None, queue=self._fallback_tracks())
         self._profile_logged = False
         self._feature_cache: dict[str, dict[str, float] | None] = {}
-        self._lock = threading.RLock()
+        self._client_lock = threading.RLock()
+        self._state_lock = threading.RLock()
         self._refresh_generation = 0
         self._recent_recommendation_ids: deque[str] = deque(maxlen=RECENT_RECOMMENDATION_HISTORY)
         self._recent_recommendation_artists: deque[str] = deque(maxlen=RECENT_ARTIST_HISTORY)
@@ -83,58 +84,60 @@ class SpotifyController:
         return cls(recommendation_limit=config.spotify_recommendation_limit)
 
     def refresh_for_mood(self, mood: MoodLabel, limit: int = 4) -> SpotifySnapshot:
-        with self._lock:
-            limit = limit or self.recommendation_limit
-            if self.client is None:
-                logger.info("Spotify client unavailable, using fallback queue for mood=%s", mood.value)
-                self.snapshot = SpotifySnapshot(
-                    current_track=self.snapshot.current_track,
-                    queue=self._fallback_tracks(mood, limit),
-                    last_refresh=datetime.now(),
-                )
-                return self.snapshot
+        limit = limit or self.recommendation_limit
+        if self.client is None:
+            logger.info("Spotify client unavailable, using fallback queue for mood=%s", mood.value)
+            snapshot = SpotifySnapshot(
+                current_track=self.get_snapshot().current_track,
+                queue=self._fallback_tracks(mood, limit),
+                last_refresh=datetime.now(),
+            )
+            self._set_snapshot(snapshot)
+            return snapshot
 
-            try:
-                profile = self._build_taste_profile()
-                if not self._profile_logged:
-                    logger.info(
-                        "Initialized taste profile with %d top artists from the past month and %d recent tracks",
-                        len(profile.top_artist_names),
-                        len(profile.recent_track_ids),
-                    )
-                    self._profile_logged = True
-
-                candidates = self._search_candidate_tracks(mood, profile)
-                ranked_queue = self._rank_candidates(mood, candidates, profile, limit)
-                if not ranked_queue:
-                    logger.warning("Search/rerank produced no candidates for mood=%s", mood.value)
-                    ranked_queue = self._fallback_tracks(mood, limit)
-
-                self.snapshot = SpotifySnapshot(
-                    current_track=self.current_playback(),
-                    queue=ranked_queue,
-                    last_refresh=datetime.now(),
-                )
-                self._remember_recommendations(self.snapshot.queue)
-                self._refresh_generation += 1
+        try:
+            profile = self._build_taste_profile()
+            if not self._profile_logged:
                 logger.info(
-                    "Built mood queue for mood=%s with %d tracks from %d candidates",
-                    mood.value,
-                    len(self.snapshot.queue),
-                    len(candidates),
+                    "Initialized taste profile with %d top artists from the past month and %d recent tracks",
+                    len(profile.top_artist_names),
+                    len(profile.recent_track_ids),
                 )
-                return self.snapshot
-            except Exception:
-                logger.exception("Spotify search/rerank refresh failed for mood=%s", mood.value)
-                self.snapshot = SpotifySnapshot(
-                    current_track=self.snapshot.current_track,
-                    queue=self._fallback_tracks(mood, limit),
-                    last_refresh=datetime.now(),
-                )
-                return self.snapshot
+                self._profile_logged = True
+
+            candidates = self._search_candidate_tracks(mood, profile)
+            ranked_queue = self._rank_candidates(mood, candidates, profile, limit)
+            if not ranked_queue:
+                logger.warning("Search/rerank produced no candidates for mood=%s", mood.value)
+                ranked_queue = self._fallback_tracks(mood, limit)
+
+            snapshot = SpotifySnapshot(
+                current_track=self.current_playback(),
+                queue=ranked_queue,
+                last_refresh=datetime.now(),
+            )
+            self._remember_recommendations(snapshot.queue)
+            self._refresh_generation += 1
+            self._set_snapshot(snapshot)
+            logger.info(
+                "Built mood queue for mood=%s with %d tracks from %d candidates",
+                mood.value,
+                len(snapshot.queue),
+                len(candidates),
+            )
+            return snapshot
+        except Exception:
+            logger.exception("Spotify search/rerank refresh failed for mood=%s", mood.value)
+            snapshot = SpotifySnapshot(
+                current_track=self.get_snapshot().current_track,
+                queue=self._fallback_tracks(mood, limit),
+                last_refresh=datetime.now(),
+            )
+            self._set_snapshot(snapshot)
+            return snapshot
 
     def current_playback(self) -> TrackSummary | None:
-        with self._lock:
+        with self._client_lock:
             if self.client is None:
                 return None
 
@@ -150,29 +153,31 @@ class SpotifyController:
                 return None
 
     def queue_top_track(self) -> None:
-        with self._lock:
-            if self.client is None or not self.snapshot.queue:
-                return
+        snapshot = self.get_snapshot()
+        if self.client is None or not snapshot.queue:
+            return
 
+        with self._client_lock:
             try:
-                self.client.add_to_queue(self.snapshot.queue[0].uri)
+                self.client.add_to_queue(snapshot.queue[0].uri)
                 self.client.next_track()
-                logger.info("Queued and skipped to recommended track: %s", self.snapshot.queue[0].name)
+                logger.info("Queued and skipped to recommended track: %s", snapshot.queue[0].name)
             except Exception:
                 logger.exception("Failed to queue or skip to the recommended Spotify track")
 
     def apply_queue_to_spotify(self, max_tracks: int | None = None) -> int:
-        with self._lock:
-            if self.client is None or not self.snapshot.queue:
-                return 0
+        snapshot = self.get_snapshot()
+        if self.client is None or not snapshot.queue:
+            return 0
 
-            desired_tracks = self.snapshot.queue[: max_tracks or len(self.snapshot.queue)]
-            existing_ids = {track.track_id for track in self.get_queue_tracks()}
-            current_track = self.current_playback()
-            if current_track is not None:
-                existing_ids.add(current_track.track_id)
+        desired_tracks = snapshot.queue[: max_tracks or len(snapshot.queue)]
+        existing_ids = {track.track_id for track in self.get_queue_tracks()}
+        current_track = self.current_playback()
+        if current_track is not None:
+            existing_ids.add(current_track.track_id)
 
-            queued = 0
+        queued = 0
+        with self._client_lock:
             for track in desired_tracks:
                 if track.track_id in existing_ids:
                     logger.debug("Skipping already-present Spotify queue track: %s", track.name)
@@ -185,11 +190,11 @@ class SpotifyController:
                 except Exception:
                     logger.exception("Failed to add recommended track to Spotify queue: %s", track.name)
 
-            logger.info("Applied %d tracks from the mood queue to Spotify", queued)
-            return queued
+        logger.info("Applied %d tracks from the mood queue to Spotify", queued)
+        return queued
 
     def get_queue_tracks(self) -> list[TrackSummary]:
-        with self._lock:
+        with self._client_lock:
             if self.client is None:
                 return []
 
@@ -202,6 +207,14 @@ class SpotifyController:
             tracks = response.get("queue", [])
             logger.debug("Fetched %d tracks from the current Spotify queue", len(tracks))
             return [self._track_from_spotify(track) for track in tracks]
+
+    def get_snapshot(self) -> SpotifySnapshot:
+        with self._state_lock:
+            return SpotifySnapshot(
+                current_track=self.snapshot.current_track,
+                queue=list(self.snapshot.queue),
+                last_refresh=self.snapshot.last_refresh,
+            )
 
     def _build_client(self) -> spotipy.Spotify | None:
         client_id = os.getenv("SPOTIFY_CLIENT_ID") or os.getenv("CLIENT_ID")
@@ -226,9 +239,10 @@ class SpotifyController:
         if self.client is None:
             return TasteProfile()
 
-        recent = self.client.current_user_recently_played(limit=15)
-        top_tracks = self.client.current_user_top_tracks(limit=10, time_range="short_term")
-        top_artists = self.client.current_user_top_artists(limit=10, time_range="short_term")
+        with self._client_lock:
+            recent = self.client.current_user_recently_played(limit=15)
+            top_tracks = self.client.current_user_top_tracks(limit=10, time_range="short_term")
+            top_artists = self.client.current_user_top_artists(limit=10, time_range="short_term")
 
         profile = TasteProfile()
 
@@ -275,13 +289,14 @@ class SpotifyController:
             try:
                 logger.debug("Spotify search query for mood=%s: %s", mood.value, query)
                 offset = self._query_offset(index)
-                response = self.client.search(
-                    q=query,
-                    type="track",
-                    limit=SEARCH_LIMIT_PER_QUERY,
-                    offset=offset,
-                    market="US",
-                )
+                with self._client_lock:
+                    response = self.client.search(
+                        q=query,
+                        type="track",
+                        limit=SEARCH_LIMIT_PER_QUERY,
+                        offset=offset,
+                        market="US",
+                    )
             except Exception:
                 logger.warning("Spotify search failed for query=%s", query, exc_info=True)
                 continue
@@ -485,6 +500,10 @@ class SpotifyController:
     def _query_offset(self, query_index: int) -> int:
         cycle = self._refresh_generation % SEARCH_OFFSET_CYCLE
         return (cycle * SEARCH_OFFSET_STEP) + ((query_index % 2) * SEARCH_OFFSET_STEP)
+
+    def _set_snapshot(self, snapshot: SpotifySnapshot) -> None:
+        with self._state_lock:
+            self.snapshot = snapshot
 
     def _fallback_tracks(self, mood: MoodLabel = MoodLabel.FOCUSED, limit: int = 4) -> list[TrackSummary]:
         defaults = {
