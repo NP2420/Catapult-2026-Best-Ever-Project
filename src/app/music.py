@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 import logging
+import os
 import sys
+import signal
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -175,10 +177,12 @@ def main() -> int:
 
     window.show()
     controller.start()
-    import signal
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    return app.exec()
+    exit_code = app.exec()
+    controller.stop()
+    logger.info("Exiting with code %d", exit_code)
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -180,7 +180,9 @@ class WebcamInferenceMonitor:
         logger.info("Stopping webcam inference monitor")
         self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                logger.warning("Webcam monitor thread did not exit in time (likely blocked in YOLO inference)")
 
     def latest_sample(self) -> WebcamSample:
         with self._lock:

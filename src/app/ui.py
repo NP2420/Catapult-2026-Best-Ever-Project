@@ -252,6 +252,32 @@ class BuddyWindow(QWidget):
         title = QLabel("AI Study Buddy")
         title.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
 
+        self._quit_button = QPushButton("✕")
+        self._quit_button.setFixedSize(24, 24)
+        self._quit_button.setStyleSheet(
+            """
+            QPushButton {
+                background: #EF4444;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 12px;
+                padding: 0px;
+                font-weight: 700;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #DC2626;
+            }
+            """
+        )
+        self._quit_button.clicked.connect(QApplication.quit)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._quit_button)
+
         self._song_label = QLabel("Playing: Waiting for playback")
         self._queue_label = QLabel("Up next: building queue...")
         self._score_label = QLabel("Tiredness: 0.20 (awake)")
@@ -267,7 +293,7 @@ class BuddyWindow(QWidget):
         panel_layout = QVBoxLayout()
         panel_layout.setContentsMargins(16, 16, 16, 16)
         panel_layout.setSpacing(8)
-        panel_layout.addWidget(title)
+        panel_layout.addLayout(title_row)
         panel_layout.addWidget(self._song_label)
         panel_layout.addWidget(self._queue_label)
         panel_layout.addWidget(self._score_label)
