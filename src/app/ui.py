@@ -556,14 +556,12 @@ class BuddyWindow(QWidget):
         current_track: TrackSummary | None,
         upcoming_tracks: list[TrackSummary],
     ) -> str:
-        visible_tracks: list[str] = []
         current_track_id = current_track.track_id if current_track else None
+        eligible_tracks = [
+            track for track in upcoming_tracks if not current_track_id or track.track_id != current_track_id
+        ]
+        if not eligible_tracks:
+            return "No queued recommendations"
 
-        for track in upcoming_tracks:
-            if current_track_id and track.track_id == current_track_id:
-                continue
-            visible_tracks.append(f"{track.name} - {track.artist}")
-            if len(visible_tracks) >= VISIBLE_QUEUE_ITEMS:
-                break
-
-        return ", ".join(visible_tracks) or "No queued recommendations"
+        next_track = eligible_tracks[-1]
+        return f"{next_track.name} - {next_track.artist}"
