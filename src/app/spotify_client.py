@@ -40,6 +40,8 @@ SEARCH_OFFSET_STEP = 10
 SEARCH_OFFSET_CYCLE = 3
 RECENT_RECOMMENDATION_HISTORY = 80
 RECENT_ARTIST_HISTORY = 80
+TASTE_PROFILE_TTL_SECONDS = 300
+CANDIDATE_CACHE_TTL_SECONDS = 300
 
 AWAKE_GENRES = ["study", "ambient", "chill", "classical"]
 DROWSY_GENRES = ["lofi", "indie", "electropop", "alt-rock"]
@@ -81,12 +83,19 @@ class SpotifyController:
         self._refresh_generation = 0
         self._recent_recommendation_ids: deque[str] = deque(maxlen=RECENT_RECOMMENDATION_HISTORY)
         self._recent_recommendation_artists: deque[str] = deque(maxlen=RECENT_ARTIST_HISTORY)
+        self._cached_profile: TasteProfile | None = None
+        self._profile_cached_at: datetime | None = None
+        self._cached_fatigue_state: str | None = None
+        self._cached_candidates: list[TrackSummary] = []
+        self._candidates_cached_at: datetime | None = None
+        self._spotipy_call_count = 0
 
     @classmethod
     def from_config(cls, config: AppConfig) -> "SpotifyController":
         return cls(recommendation_limit=config.spotify_recommendation_limit)
 
     def refresh_for_score(self, ema_score: float, limit: int = 4) -> SpotifySnapshot:
+        self._spotipy_call_count = 0
         score = clamp_score(ema_score)
         state_label = fatigue_state_from_score(score)
         limit = limit or self.recommendation_limit
@@ -102,9 +111,12 @@ class SpotifyController:
                 last_refresh=datetime.now(),
             )
             self._set_snapshot(snapshot)
+            logger.info("refresh_for_score made %d spotipy API request(s)", self._spotipy_call_count)
             return snapshot
 
         try:
+            current_track = self.current_playback()
+
             profile = self._build_taste_profile()
             if not self._profile_logged:
                 logger.info(
@@ -114,14 +126,14 @@ class SpotifyController:
                 )
                 self._profile_logged = True
 
-            candidates = self._search_candidate_tracks(score, profile)
+            candidates = self._search_candidate_tracks(score, profile, current_track)
             ranked_queue = self._rank_candidates(score, candidates, profile, limit)
             if not ranked_queue:
                 logger.warning("Search/rerank produced no candidates for score=%.2f (%s)", score, state_label)
                 ranked_queue = self._fallback_tracks(score, limit)
 
             snapshot = SpotifySnapshot(
-                current_track=self.current_playback(),
+                current_track=current_track,
                 queue=ranked_queue,
                 last_refresh=datetime.now(),
             )
@@ -135,6 +147,7 @@ class SpotifyController:
                 len(snapshot.queue),
                 len(candidates),
             )
+            logger.info("refresh_for_score made %d spotipy API request(s)", self._spotipy_call_count)
             return snapshot
         except Exception:
             logger.exception("Spotify search/rerank refresh failed for score=%.2f (%s)", score, state_label)
@@ -144,6 +157,7 @@ class SpotifyController:
                 last_refresh=datetime.now(),
             )
             self._set_snapshot(snapshot)
+            logger.info("refresh_for_score made %d spotipy API request(s)", self._spotipy_call_count)
             return snapshot
 
     def current_playback(self) -> TrackSummary | None:
@@ -152,6 +166,7 @@ class SpotifyController:
                 return None
 
             try:
+                self._spotipy_call_count += 1
                 playback = self.client.current_playback()
                 item = (playback or {}).get("item")
                 if not item:
@@ -249,7 +264,17 @@ class SpotifyController:
         if self.client is None:
             return TasteProfile()
 
+        now = datetime.now()
+        if (
+            self._cached_profile is not None
+            and self._profile_cached_at is not None
+            and (now - self._profile_cached_at).total_seconds() < TASTE_PROFILE_TTL_SECONDS
+        ):
+            logger.debug("Returning cached taste profile (age=%.0fs)", (now - self._profile_cached_at).total_seconds())
+            return self._cached_profile
+
         with self._client_lock:
+            self._spotipy_call_count += 3
             recent = self.client.current_user_recently_played(limit=15)
             top_tracks = self.client.current_user_top_tracks(limit=10, time_range="short_term")
             top_artists = self.client.current_user_top_artists(limit=10, time_range="short_term")
@@ -281,19 +306,38 @@ class SpotifyController:
             len(profile.top_track_ids),
             len(profile.top_artist_names),
         )
+        self._cached_profile = profile
+        self._profile_cached_at = datetime.now()
         return profile
 
-    def _search_candidate_tracks(self, ema_score: float, profile: TasteProfile) -> list[TrackSummary]:
+    def _search_candidate_tracks(
+        self, ema_score: float, profile: TasteProfile, current_track: TrackSummary | None = None,
+    ) -> list[TrackSummary]:
         if self.client is None:
             return []
 
         score = clamp_score(ema_score)
         state_label = fatigue_state_from_score(score)
+
+        now = datetime.now()
+        if (
+            self._cached_fatigue_state == state_label
+            and self._cached_candidates
+            and self._candidates_cached_at is not None
+            and (now - self._candidates_cached_at).total_seconds() < CANDIDATE_CACHE_TTL_SECONDS
+        ):
+            logger.info(
+                "Reusing %d cached candidates for state=%s (age=%.0fs)",
+                len(self._cached_candidates),
+                state_label,
+                (now - self._candidates_cached_at).total_seconds(),
+            )
+            return list(self._cached_candidates)
+
         queries = self._candidate_queries_for_score(score, profile)
         candidates: list[TrackSummary] = []
         seen_ids: set[str] = set()
         excluded = set(profile.excluded_track_ids) | set(self._recent_recommendation_ids)
-        current_track = self.current_playback()
         if current_track:
             excluded.add(current_track.track_id)
 
@@ -302,6 +346,7 @@ class SpotifyController:
                 logger.debug("Spotify search query for score=%.2f (%s): %s", score, state_label, query)
                 offset = self._query_offset(index)
                 with self._client_lock:
+                    self._spotipy_call_count += 1
                     response = self.client.search(
                         q=query,
                         type="track",
@@ -322,6 +367,9 @@ class SpotifyController:
                 candidates.append(track)
 
         logger.info("Collected %d candidate tracks for score=%.2f (%s)", len(candidates), score, state_label)
+        self._cached_fatigue_state = state_label
+        self._cached_candidates = list(candidates)
+        self._candidates_cached_at = datetime.now()
         return candidates
 
     def _candidate_queries_for_score(self, ema_score: float, profile: TasteProfile) -> list[str]:
