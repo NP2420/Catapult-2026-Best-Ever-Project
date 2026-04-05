@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -29,6 +30,10 @@ RECCOBEATS_AUDIO_FEATURES_URL = "https://api.reccobeats.com/v1/audio-features"
 SEARCH_LIMIT_PER_QUERY = 10
 RECCOBEATS_BATCH_SIZE = 8
 RECCOBEATS_TIMEOUT_SECONDS = 10
+SEARCH_OFFSET_STEP = 10
+SEARCH_OFFSET_CYCLE = 3
+RECENT_RECOMMENDATION_HISTORY = 80
+RECENT_ARTIST_HISTORY = 80
 
 MOOD_GENRES: dict[MoodLabel, list[str]] = {
     MoodLabel.FOCUSED: ["study", "ambient", "chill", "classical"],
@@ -69,6 +74,9 @@ class SpotifyController:
         self._profile_logged = False
         self._feature_cache: dict[str, dict[str, float] | None] = {}
         self._lock = threading.RLock()
+        self._refresh_generation = 0
+        self._recent_recommendation_ids: deque[str] = deque(maxlen=RECENT_RECOMMENDATION_HISTORY)
+        self._recent_recommendation_artists: deque[str] = deque(maxlen=RECENT_ARTIST_HISTORY)
 
     @classmethod
     def from_config(cls, config: AppConfig) -> "SpotifyController":
@@ -107,6 +115,8 @@ class SpotifyController:
                     queue=ranked_queue,
                     last_refresh=datetime.now(),
                 )
+                self._remember_recommendations(self.snapshot.queue)
+                self._refresh_generation += 1
                 logger.info(
                     "Built mood queue for mood=%s with %d tracks from %d candidates",
                     mood.value,
@@ -256,15 +266,22 @@ class SpotifyController:
         queries = self._candidate_queries_for_mood(mood, profile)
         candidates: list[TrackSummary] = []
         seen_ids: set[str] = set()
-        excluded = profile.excluded_track_ids
+        excluded = set(profile.excluded_track_ids) | set(self._recent_recommendation_ids)
         current_track = self.current_playback()
         if current_track:
             excluded.add(current_track.track_id)
 
-        for query in queries:
+        for index, query in enumerate(queries):
             try:
                 logger.debug("Spotify search query for mood=%s: %s", mood.value, query)
-                response = self.client.search(q=query, type="track", limit=SEARCH_LIMIT_PER_QUERY, market="US")
+                offset = self._query_offset(index)
+                response = self.client.search(
+                    q=query,
+                    type="track",
+                    limit=SEARCH_LIMIT_PER_QUERY,
+                    offset=offset,
+                    market="US",
+                )
             except Exception:
                 logger.warning("Spotify search failed for query=%s", query, exc_info=True)
                 continue
@@ -281,8 +298,8 @@ class SpotifyController:
         return candidates
 
     def _candidate_queries_for_mood(self, mood: MoodLabel, profile: TasteProfile) -> list[str]:
-        artist_names = profile.seed_artist_names[:4]
-        genres = MOOD_GENRES[mood][:3]
+        artist_names = profile.seed_artist_names[:6]
+        genres = MOOD_GENRES[mood][:4]
 
         queries: list[str] = []
         for genre in genres:
@@ -417,8 +434,18 @@ class SpotifyController:
 
         artist_match = 0.15 if any(name in track.artist for name in profile.seed_artist_names[:5]) else 0.0
         freshness_bonus = 0.1 if track.track_id not in profile.excluded_track_ids else -0.5
+        recommendation_penalty = -0.6 if track.track_id in self._recent_recommendation_ids else 0.0
+        artist_repeat_penalty = self._artist_repeat_penalty(track.artist)
 
-        return (energy_score * 0.4) + (valence_score * 0.3) + (tempo_score * 0.3) + artist_match + freshness_bonus
+        return (
+            (energy_score * 0.4)
+            + (valence_score * 0.3)
+            + (tempo_score * 0.3)
+            + artist_match
+            + freshness_bonus
+            + recommendation_penalty
+            + artist_repeat_penalty
+        )
 
     def _target_audio_profile(self, mood: MoodLabel) -> dict[str, float]:
         if mood in {MoodLabel.TIRED, MoodLabel.BORED}:
@@ -435,6 +462,29 @@ class SpotifyController:
             artist=", ".join(artist.get("name", "Unknown Artist") for artist in artists),
             uri=item.get("uri", ""),
         )
+
+    def _remember_recommendations(self, tracks: list[TrackSummary]) -> None:
+        for track in tracks:
+            self._recent_recommendation_ids.append(track.track_id)
+            for artist_name in track.artist.split(", "):
+                normalized = artist_name.strip()
+                if normalized:
+                    self._recent_recommendation_artists.append(normalized)
+
+    def _artist_repeat_penalty(self, artist_text: str) -> float:
+        penalty = 0.0
+        recent_artists = list(self._recent_recommendation_artists)
+        for artist_name in artist_text.split(", "):
+            normalized = artist_name.strip()
+            if not normalized:
+                continue
+            occurrences = recent_artists.count(normalized)
+            penalty -= min(0.12 * occurrences, 0.36)
+        return penalty
+
+    def _query_offset(self, query_index: int) -> int:
+        cycle = self._refresh_generation % SEARCH_OFFSET_CYCLE
+        return (cycle * SEARCH_OFFSET_STEP) + ((query_index % 2) * SEARCH_OFFSET_STEP)
 
     def _fallback_tracks(self, mood: MoodLabel = MoodLabel.FOCUSED, limit: int = 4) -> list[TrackSummary]:
         defaults = {
