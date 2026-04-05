@@ -45,6 +45,11 @@ STATE_MESSAGES = {
         "Step away and refresh your mind.",
         "Stretch or grab a snack!",
     ],
+    "break_complete": [
+        "Break's over. You're ready to resume.",
+        "Nice reset. Jump back in when you're ready.",
+        "Break complete. Let's get back to it.",
+    ],
     "default": [
         "You're doing great, keep it up!",
         "Almost there, keep going!",
@@ -196,6 +201,7 @@ class BuddyWindow(QWidget):
         self._bottom_right: QPoint | None = None
         self._last_message: str | None = None
         self._latest_snapshot: SessionSnapshot | None = None
+        self._break_complete_announced = False
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -330,7 +336,9 @@ class BuddyWindow(QWidget):
         self._refresh_layout()
 
     def _choose_message(self, snapshot: SessionSnapshot) -> str:
-        if snapshot.break_state.active:
+        if snapshot.break_state.active and snapshot.break_state.can_resume:
+            choices = STATE_MESSAGES["break_complete"]
+        elif snapshot.break_state.active:
             choices = STATE_MESSAGES["break"]
         else:
             if not snapshot.face_detected:
@@ -389,17 +397,23 @@ class BuddyWindow(QWidget):
     def update_snapshot(self, snapshot: SessionSnapshot, webcam_available: bool) -> None:
         self._latest_snapshot = snapshot
         self._buddy.set_state(snapshot.ema_score, snapshot.break_state)
-        self._score_label.setText(
-            f"Tiredness: {snapshot.ema_score:.2f} ({snapshot.state_label}) | 5s avg: {snapshot.rolling_score:.2f}"
-        )
-        self._status_label.setText(
+        on_break = snapshot.break_state.active
+        self._score_label.setVisible(not on_break)
+        if not on_break:
+            self._score_label.setText(
+                f"Tiredness: {snapshot.ema_score:.2f} ({snapshot.state_label}) | 5s avg: {snapshot.rolling_score:.2f}"
+            )
+
+        status_text = (
             "Camera: "
             + (
                 f"{'live' if webcam_available else 'offline, using fallback'}"
                 f" | {'face detected' if snapshot.face_detected else 'no face detected'}"
-                f" | Fatigue: {snapshot.fatigue_seconds:.0f}s"
             )
         )
+        if not on_break:
+            status_text += f" | Fatigue: {snapshot.fatigue_seconds:.0f}s"
+        self._status_label.setText(status_text)
         self._song_label.setText(
             "Playing: "
             + (
@@ -421,7 +435,16 @@ class BuddyWindow(QWidget):
             )
         )
 
-        if snapshot.break_state.active and not self._bubble.isVisible():
+        if not snapshot.break_state.active:
+            self._break_complete_announced = False
+        elif snapshot.break_state.active and snapshot.break_state.can_resume and not self._break_complete_announced:
+            self._break_complete_announced = True
+            self._show_state_message()
+        elif snapshot.break_state.active and not snapshot.break_state.can_resume:
+            self._break_complete_announced = False
+            if not self._bubble.isVisible():
+                self._show_state_message()
+        elif snapshot.break_state.active and not self._bubble.isVisible():
             self._show_state_message()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
